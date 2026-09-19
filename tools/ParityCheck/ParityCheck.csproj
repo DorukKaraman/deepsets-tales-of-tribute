@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Deliberately UNLIKE GameRunner: this tool's whole point is to call
+         Bots.FeatureExtractor.ParseState directly, the real production method,
+         not a reimplementation, so it needs a real compile-time reference.
+         GameRunner intentionally avoids this (bots load dynamically via
+         reflection so it never needs recompiling when a bot changes); this
+         tool is a one-off dev/CI utility, not something the dynamic bot
+         registry needs to stay decoupled from. -->
+    <ProjectReference Include="..\..\Bots\Bots.csproj" />
+    <ProjectReference Include="..\..\Engine\TalesOfTribute.csproj" />
+  </ItemGroup>
+
+</Project>

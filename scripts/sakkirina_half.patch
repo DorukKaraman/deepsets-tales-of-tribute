@@ -1,0 +1,256 @@
+# SakkirinaSolo.cs -> SakkirinaHalf.cs  (search-volume control condition)
+#
+# WHY THIS IS A PATCH AND NOT A SOURCE FILE
+# SakkirinaHalf is 872 lines of code, of which only 36 differ from
+# SakkirinaSolo, the 2025 competition winner. Same reasoning as
+# scripts/sakkirina_gen.patch: the patch carries only our changes, and
+# scripts/fetch_baselines.sh applies it to the author's own file.
+#
+# SakkirinaSolo is the work of its author and is NOT covered by this
+# repository's licence. See README.md, "Third-party agents".
+#
+# WHAT THIS AGENT IS FOR
+# DeepSetsBot evaluates far fewer positions per game than SakkirinaSolo does
+# (~102,700 vs ~226,100), because a neural forward pass costs more than a
+# hand-written heuristic. That raises an obvious confound: is DeepSetsBot's
+# win rate explained by the network, or merely by the two agents searching
+# different volumes? SakkirinaHalf isolates it -- it is SakkirinaSolo with its
+# per-move time budget scaled by HALF_STRENGTH_FACTOR (0.45) and NOTHING else
+# changed, so it reproduces the throughput deficit without also swapping the
+# evaluator. It is a control condition, not a candidate agent.
+# See experiments/README.md.
+#
+# WHAT THE PATCH CHANGES (three things, nothing else)
+#
+#   1. Rename.  class SakkirinaSolo -> class SakkirinaHalf.
+#
+#   2. HALF_STRENGTH_FACTOR (0.45) applied to the per-move time budget.
+#
+#   3. The same null-move fix as scripts/sakkirina_gen.patch, so the control
+#      and the treatment differ in search volume alone and not in whether they
+#      forfeit games to illegal moves. Logs once via BotLog (defined in
+#      Bots/src/DeepSetsCore.cs).
+#
+# APPLY
+#   patch -o Bots/src/SakkirinaHalf.cs Bots/src/SakkirinaSolo.cs \
+#         < scripts/sakkirina_half.patch
+#   (done for you by scripts/fetch_baselines.sh)
+#
+# BASE: ScriptsOfTribute-CompetitionsArchive commit
+#       105aaa72b2cdc4544873f75cd0356d47929dadea
+#       competition-2025-08-COG/cs_agents/SakkirinaSolo/SakkirinaSolo.cs
+--- SakkirinaSolo.cs	2026-09-19 10:35:59
++++ SakkirinaHalf.cs	2026-09-19 10:35:59
+@@ -9,7 +9,15 @@
+ namespace Bots;
+ 
+ 
+-public class SakkirinaSolo : AI
++// Copy of SakkirinaSolo.cs with exactly one functional change: the per-move
++// search time budget is scaled by HALF_STRENGTH_FACTOR (0.45) to artificially
++// reproduce the ~45% eval-count deficit SakkirinaNeural showed relative to
++// stock SakkirinaSolo (102,734 vs 226,057 evals/game) -- so ISMCTSBot-style
++// throughput handicapping can be A/B'd against a bot that's otherwise
++// identical to the reference, without the confound of also swapping in a
++// slower evaluator. Do not restructure the search here -- if it needs fixing,
++// fix it in SakkirinaSolo.cs first.
++public class SakkirinaHalf : AI
+ {
+     static bool CheckRandomTransition(SeededGameState gameState, SeededGameState newGameState)
+     {
+@@ -212,11 +220,45 @@
+ 
+     Node? rootNode;
+     TimeSpan usedTimeInTurn = TimeSpan.FromSeconds(0);
+-    TimeSpan TurnTimeout = TimeSpan.FromSeconds(9.8);
++    TimeSpan TurnTimeout = TimeSpan.FromSeconds(HALF_STRENGTH_FACTOR * 9.8);
+     PlayerEnum myPlayerID;
+     SeededRandom rng;
+ 
+-    public SakkirinaSolo()
++    // The one intentional change from SakkirinaSolo: scale the per-move search
++    // budget directly rather than capping the TreeSearch loop's iteration count
++    // at some fraction of "what stock SakkirinaSolo would have reached" -- that
++    // target isn't knowable at runtime without a live reference run happening
++    // alongside this one. Search here is time-bounded with an unmodified
++    // evaluator, so throughput (evals/sec) is roughly constant call to call,
++    // and scaling the time budget by a constant factor scales the resulting
++    // eval count by close to the same factor -- with no external calibration
++    // constant to go stale if hardware or timing conditions change.
++    //
++    // This needs BOTH constants that define the per-move/per-turn time economy
++    // scaled together, not just the 0.65s absolute per-call cap in isolation.
++    // A first attempt scaled only that cap (leaving TurnTimeout at 9.8s) and
++    // measured at ~73% of stock's eval rate, not ~45%: cheaper individual calls
++    // just meant more of them fit under the same unscaled TurnTimeout ceiling
++    // before usedTimeInTurn >= TurnTimeout forced a fast/instant move, largely
++    // offsetting the intended reduction. Scaling TurnTimeout by the same factor
++    // (see its declaration above) keeps the number of calls-before-fallback
++    // comparable to stock's own pattern while each call does ~45% as much work,
++    // which is what actually produces a ~45% reduction in the per-game total.
++    const double HALF_STRENGTH_FACTOR = 0.45;
++
++    // Eval counter + wall clock, added purely to verify HALF_STRENGTH_FACTOR
++    // actually lands the eval count near the target -- mirrors SakkirinaNeural's
++    // throughput telemetry.
++    private long _totalEvalCalls = 0;
++    private readonly Stopwatch _gameWallClock = new Stopwatch();
++    // Accumulates ONLY the time spent inside the "thinking" search loop (s.Elapsed
++    // per call), excluding opponent turns, instant/rule-based moves, and patron
++    // selection -- evalsPerSec over _gameWallClock turned out to be far too noisy
++    // (game length and opponent-turn time swamp the signal); this isolates
++    // exactly the quantity HALF_STRENGTH_FACTOR targets.
++    private double _totalThinkingSeconds = 0.0;
++
++    public SakkirinaHalf()
+     {
+         this.rng = new SeededRandom(12345679u);
+         this.PrepareForGame();
+@@ -272,8 +314,11 @@
+         return 10 * (int)tier + agent.CurrentHp * 3;
+     }
+ 
+-    static double Evaluate(SeededGameState gameState, PlayerEnum playerID)
++    // No longer static: needs the instance-level _totalEvalCalls counter below.
++    // Body is otherwise byte-for-byte identical to SakkirinaSolo.Evaluate.
++    double Evaluate(SeededGameState gameState, PlayerEnum playerID)
+     {
++        _totalEvalCalls++;
+         double value = 0;
+ 
+         // パトロンの選好
+@@ -816,21 +861,49 @@
+         node.Update(value);
+         return value;
+     }
++
++    // Known pre-existing SakkirinaSolo.cs bug (found and fixed the same way in
++    // SakkirinaNeural.cs): Play() could pass a null move here when bestMove has
++    // no isomorphic match in the current possibleMoves, throwing inside the
++    // inlined AreIsomorphic with no frame appearing below ProceedTree in a
++    // Release stack trace. Fixed at the source in Play() below (null-move
++    // fallback to possibleMoves[0]), which should make this catch dead code --
++    // kept as defense in depth since tree-reuse detection failing for any
++    // reason should cost a cache miss, not the game. This bug fires far more
++    // often here than in SakkirinaNeural: a smaller search budget means a
++    // shallower, less-explored tree, which makes "bestMove has no isomorphic
++    // match under a fresh determinization" more likely, not less.
++    private bool _firstProceedTreeExceptionLogged = false;
+ 
++    // Counts how often Play()'s null-move fallback fires.
++    private long _noIsomorphicMatchCount = 0;
++    private bool _firstNoIsomorphicMatchLogged = false;
++
+     void ProceedTree(Move move)
+     {
+-        if (rootNode is null) return;
+-        if (rootNode.childs is not null &&
+-            move.Command != CommandEnum.END_TURN) {
+-            foreach (var child in rootNode.childs) {
+-                if (!child.stochastic && child.nodes?.Count == 1) {
+-                    if (MoveComparer.AreIsomorphic(child.move, move)) {
+-                        rootNode = child.nodes[0];
+-                        return;
++        try
++        {
++            if (rootNode is null) return;
++            if (rootNode.childs is not null &&
++                move.Command != CommandEnum.END_TURN) {
++                foreach (var child in rootNode.childs) {
++                    if (!child.stochastic && child.nodes?.Count == 1) {
++                        if (MoveComparer.AreIsomorphic(child.move, move)) {
++                            rootNode = child.nodes[0];
++                            return;
++                        }
+                     }
+                 }
+             }
+         }
++        catch (Exception ex)
++        {
++            if (!_firstProceedTreeExceptionLogged)
++            {
++                _firstProceedTreeExceptionLogged = true;
++                BotLog.Write($"SakkirinaHalf.ProceedTree: caught exception, falling back to no tree reuse: {ex}");
++            }
++        }
+         rootNode = null;
+     }
+ 
+@@ -842,6 +915,11 @@
+             gameState.EnemyPlayer.Prestige);
+     }
+ 
++    public override void PregamePrepare()
++    {
++        _gameWallClock.Restart();
++    }
++
+     public override PatronId SelectPatron(List<PatronId> availablePatrons, int round)
+     {
+         return availablePatrons[rng.Next() % availablePatrons.Count];
+@@ -890,7 +968,7 @@
+         }
+ 
+         // thinking...
+-        TimeSpan timeForMoveComputation = TimeSpan.FromSeconds(Math.Min(0.65, (TurnTimeout - usedTimeInTurn).TotalSeconds / 4));
++        TimeSpan timeForMoveComputation = TimeSpan.FromSeconds(Math.Min(HALF_STRENGTH_FACTOR * 0.65, (TurnTimeout - usedTimeInTurn).TotalSeconds / 4));
+         Stopwatch s = new Stopwatch();
+         s.Start();
+         if (!CheckIfSameGameStateAfterOneMove(rootNode, gameState)) rootNode = null; // check tree reuse
+@@ -901,6 +979,7 @@
+             TreeSearch(rootNode, rng, 0);
+         }
+         usedTimeInTurn += s.Elapsed;
++        _totalThinkingSeconds += s.Elapsed.TotalSeconds;
+ 
+         var bestChild = rootNode.BestChild();
+         var bestMove = bestChild.move;
+@@ -913,11 +992,46 @@
+             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
+         }
+ 
++        // Known pre-existing bug (see ProceedTree above): move was overwritten
++        // to RootRuleBasedMove(...)'s result earlier in this method and is only
++        // reassigned inside the foreach just above -- if bestMove (from a tree
++        // that may have been built under a different determinization) has no
++        // isomorphic match in the CURRENT possibleMoves, move is still null
++        // here. bestMove itself is not a safe substitute -- it may not be legal
++        // in the current (re-determinized) state -- so fall back to
++        // possibleMoves[0], which always is.
++        if (move is null)
++        {
++            _noIsomorphicMatchCount++;
++            if (!_firstNoIsomorphicMatchLogged)
++            {
++                _firstNoIsomorphicMatchLogged = true;
++                BotLog.Write($"SakkirinaHalf.Play: bestMove had no isomorphic match in possibleMoves -- " +
++                             $"bestMove.Command={bestMove.Command}, bestMove type={bestMove.GetType().FullName}. " +
++                             $"Falling back to possibleMoves[0].");
++            }
++            move = possibleMoves[0];
++        }
++
+         ProceedTree(move);
+         return move;
+     }
+ 
+-    public override void GameEnd(EndGameState state, FullGameState? finalBoardState) => this.PrepareForGame();
++    public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
++    {
++        _gameWallClock.Stop();
++        double wallClockSec = _gameWallClock.Elapsed.TotalSeconds;
++        double evalsPerSec = wallClockSec > 0 ? _totalEvalCalls / wallClockSec : 0.0;
++        double evalsPerThinkingSec = _totalThinkingSeconds > 0 ? _totalEvalCalls / _totalThinkingSeconds : 0.0;
++        BotLog.Write($"SakkirinaHalf.Throughput: totalEvalCalls={_totalEvalCalls}, " +
++                     $"wallClockSec={wallClockSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}, " +
++                     $"evalsPerSec={evalsPerSec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}, " +
++                     $"thinkingSec={_totalThinkingSeconds.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}, " +
++                     $"evalsPerThinkingSec={evalsPerThinkingSec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}, " +
++                     $"reason={state.Reason}, winner={state.Winner}");
++        BotLog.Write($"SakkirinaHalf.NoIsomorphicMatchFallback: count={_noIsomorphicMatchCount}");
++        this.PrepareForGame();
++    }
+ 
+     // The following utilities are from BestMCTS3.
+     // I would like to express our deepest gratitude to the author.

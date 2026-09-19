@@ -13,4 +13,27 @@
       <ProjectReference Include="..\Engine\TalesOfTribute.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- The model lives in models/, not here, so the repository holds exactly
+           one copy of it and one recorded hash. GameRunner.csproj copies it into
+           GameRunner's own output, which is where the bots actually resolve it
+           from (see README, "Where the model has to sit"). -->
+      <None Include="..\models\DeepSetsValueNetwork.onnx">
+        <Link>DeepSetsValueNetwork.onnx</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- Control conditions and null results reported in the paper. They are
+           kept out of Bots/src/ so that directory holds only candidate agents,
+           but they must still compile into Bots.dll for GameRunner to load
+           them. See experiments/README.md. -->
+      <Compile Include="..\experiments\bots\*.cs" />
+    </ItemGroup>
+
 </Project>

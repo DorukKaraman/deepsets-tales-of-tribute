@@ -1,0 +1,247 @@
+# SakkirinaSolo.cs -> SakkirinaGen.cs  (self-play data-generation agent)
+#
+# WHY THIS IS A PATCH AND NOT A SOURCE FILE
+# SakkirinaGen is 885 lines of code, of which only 39 differ from SakkirinaSolo,
+# the 2025 competition winner. Shipping it as a source file would amount to
+# redistributing someone else's competition entry under a different class name.
+# The patch carries only our changes; scripts/fetch_baselines.sh applies it to
+# the author's own file, fetched from the competition archive.
+#
+# SakkirinaSolo is the work of its author and is NOT covered by this
+# repository's licence. See README.md, "Third-party agents".
+#
+# WHAT THE PATCH CHANGES (three things, nothing else)
+#
+#   1. Rename.  class SakkirinaSolo -> class SakkirinaGen, so both can be
+#      loaded as separate opponents in the same GameRunner process.
+#
+#   2. Exploration sampling.  ENABLE_EXPLORATION / EXPLORATION_TURNS /
+#      EXPLORATION_TEMPERATURE and Node.SampleChildByVisits. For the first
+#      EXPLORATION_TURNS turns the root move is sampled proportional to visit
+#      count instead of taking BestChild(); after that the behaviour is stock
+#      SakkirinaSolo. Without this, self-play between two deterministic
+#      instances replays nearly the same game every time and the generated
+#      training set collapses onto one trajectory.
+#
+#   3. Null-move fix.  In Play(), bestMove comes from a tree that may have been
+#      built under a different determinization, so it can have no isomorphic
+#      match in the current possibleMoves, leaving `move` null. Upstream then
+#      returns null and the engine scores it as an illegal move. bestMove is
+#      not a safe substitute (it need not be legal in this state), so we fall
+#      back to possibleMoves[0], which always is. ProceedTree() additionally
+#      gets a try/catch so a tree-reuse failure costs a cache miss, not the
+#      game. Both log once via BotLog (defined in Bots/src/DeepSetsCore.cs).
+#
+# APPLY
+#   patch -o Bots/src/SakkirinaGen.cs Bots/src/SakkirinaSolo.cs \
+#         < scripts/sakkirina_gen.patch
+#   (done for you by scripts/fetch_baselines.sh)
+#
+# BASE: ScriptsOfTribute-CompetitionsArchive commit
+#       105aaa72b2cdc4544873f75cd0356d47929dadea
+#       competition-2025-08-COG/cs_agents/SakkirinaSolo/SakkirinaSolo.cs
+--- SakkirinaSolo.cs	2026-09-19 10:35:59
++++ SakkirinaGen.cs	2026-09-19 10:35:59
+@@ -9,8 +9,26 @@
+ namespace Bots;
+ 
+ 
+-public class SakkirinaSolo : AI
++// Copy of SakkirinaSolo.cs for cluster data generation. Two changes only:
++// the null-move fix (already validated in SakkirinaNeural.cs) and exploration
++// noise for the first EXPLORATION_TURNS turns, so self-play visits more of
++// the state space than a purely deterministic bot would. Same search, same
++// time budget -- do not restructure the search here.
++public class SakkirinaGen : AI
+ {
++    // For the first EXPLORATION_TURNS turns, sample the root move
++    // proportional to visit count instead of taking BestChild(). After that,
++    // behaves exactly like stock SakkirinaSolo.
++    const bool ENABLE_EXPLORATION = true;
++    const int EXPLORATION_TURNS = 6;
++
++    // Each child's weight is visits^(1/EXPLORATION_TEMPERATURE). At 1.0 this
++    // is raw visit-proportional sampling (a no-op vs. the previous
++    // behaviour); raising it flattens the distribution toward uniform, for
++    // when root visit splits are too concentrated (e.g. [70469, 15, 15]) for
++    // proportional sampling to meaningfully diverge from BestChild().
++    const double EXPLORATION_TEMPERATURE = 1.0;
++
+     static bool CheckRandomTransition(SeededGameState gameState, SeededGameState newGameState)
+     {
+         foreach (UniqueCard card0 in newGameState.CurrentPlayer.Hand) {
+@@ -208,6 +226,52 @@
+             }
+             return this.childs[selected];
+         }
++
++        // Exploration: sample a root child proportional to
++        // visits^(1/EXPLORATION_TEMPERATURE) instead of always taking the
++        // argmax. Falls back to BestChild() if no visits have been recorded
++        // yet (shouldn't happen given the search always runs at least one
++        // iteration, but a zero-visit weighted draw has nothing to sample
++        // from).
++        //
++        // T=1.0 uses the exact same integer arithmetic as the original
++        // raw-visits sampling (rather than routing through Math.Pow and a
++        // float cumulative threshold) so that it is a bit-for-bit no-op, not
++        // just a distributionally-equivalent one -- the same rng.Next() draw
++        // must map to the same child it always did, since a same-seed game
++        // is used to verify this behaviourally.
++        public Child SampleChildByVisits(SeededRandom rng)
++        {
++            if (EXPLORATION_TEMPERATURE == 1.0) {
++                ulong totalVisits = 0;
++                foreach (var child in this.childs) totalVisits += child.visits;
++                if (totalVisits == 0) return BestChild();
++
++                ulong r = (ulong)rng.Next() % totalVisits;
++                ulong cumulative = 0;
++                foreach (var child in this.childs) {
++                    cumulative += child.visits;
++                    if (r < cumulative) return child;
++                }
++                return this.childs[this.childs.Count - 1];
++            }
++
++            var weights = new double[this.childs.Count];
++            double totalWeight = 0;
++            for (int i = 0; i < this.childs.Count; i++) {
++                weights[i] = Math.Pow(this.childs[i].visits, 1.0 / EXPLORATION_TEMPERATURE);
++                totalWeight += weights[i];
++            }
++            if (totalWeight <= 0) return BestChild();
++
++            double r2 = totalWeight * rng.Next() / int.MaxValue;
++            double cumWeight = 0;
++            for (int i = 0; i < weights.Length; i++) {
++                cumWeight += weights[i];
++                if (r2 < cumWeight) return this.childs[i];
++            }
++            return this.childs[this.childs.Count - 1];
++        }
+     }
+ 
+     Node? rootNode;
+@@ -216,7 +280,16 @@
+     PlayerEnum myPlayerID;
+     SeededRandom rng;
+ 
+-    public SakkirinaSolo()
++    // Counts how often Play()'s null-move fallback below actually fires.
++    private long _noIsomorphicMatchCount = 0;
++    private bool _firstNoIsomorphicMatchLogged = false;
++
++    // Counts this bot's own turns within the current game, incremented at
++    // each detected turn-start below. Exploration sampling is only active
++    // while _turnNumber <= EXPLORATION_TURNS.
++    private int _turnNumber = 0;
++
++    public SakkirinaGen()
+     {
+         this.rng = new SeededRandom(12345679u);
+         this.PrepareForGame();
+@@ -225,6 +298,7 @@
+     void PrepareForGame()
+     {
+         this.rootNode = null;
++        this._turnNumber = 0;
+     }
+ 
+     static double SingleCardValue(Card card)
+@@ -817,18 +891,37 @@
+         return value;
+     }
+ 
++    // Defense in depth alongside the null-move fallback in Play(): a null
++    // Move reaching here used to throw inside the inlined AreIsomorphic call
++    // with no frame appearing below ProceedTree in a Release stack trace.
++    // With that fixed at the source, this catch should never fire again --
++    // kept anyway because tree-reuse detection failing for ANY reason should
++    // cost a cache miss, not the game.
++    private bool _firstProceedTreeExceptionLogged = false;
++
+     void ProceedTree(Move move)
+     {
+-        if (rootNode is null) return;
+-        if (rootNode.childs is not null &&
+-            move.Command != CommandEnum.END_TURN) {
+-            foreach (var child in rootNode.childs) {
+-                if (!child.stochastic && child.nodes?.Count == 1) {
+-                    if (MoveComparer.AreIsomorphic(child.move, move)) {
+-                        rootNode = child.nodes[0];
+-                        return;
++        try
++        {
++            if (rootNode is null) return;
++            if (rootNode.childs is not null &&
++                move.Command != CommandEnum.END_TURN) {
++                foreach (var child in rootNode.childs) {
++                    if (!child.stochastic && child.nodes?.Count == 1) {
++                        if (MoveComparer.AreIsomorphic(child.move, move)) {
++                            rootNode = child.nodes[0];
++                            return;
++                        }
+                     }
+                 }
++            }
++        }
++        catch (Exception ex)
++        {
++            if (!_firstProceedTreeExceptionLogged)
++            {
++                _firstProceedTreeExceptionLogged = true;
++                BotLog.Write($"SakkirinaGen.ProceedTree: caught exception, falling back to no tree reuse: {ex}");
+             }
+         }
+         rootNode = null;
+@@ -867,6 +960,7 @@
+             //Console.WriteLine("start turn ***");
+             usedTimeInTurn = TimeSpan.FromSeconds(0);
+             rootNode = null;
++            _turnNumber++;
+         }
+ 
+         var move = possibleMoves[0];
+@@ -902,7 +996,15 @@
+         }
+         usedTimeInTurn += s.Elapsed;
+ 
+-        var bestChild = rootNode.BestChild();
++        // Exploration noise: for the bot's own first EXPLORATION_TURNS turns,
++        // sample the root child proportional to visit count instead of
++        // always taking the argmax, so self-play between two near-
++        // deterministic instances of this search visits more of the state
++        // space. After the window, this is exactly BestChild(), i.e. stock
++        // behavior.
++        var bestChild = (ENABLE_EXPLORATION && _turnNumber <= EXPLORATION_TURNS)
++            ? rootNode.SampleChildByVisits(rng)
++            : rootNode.BestChild();
+         var bestMove = bestChild.move;
+         double wp = bestChild.wins;
+         //Console.WriteLine("move = {0} wp = {1} in {2} trials", bestMove,
+@@ -913,6 +1015,24 @@
+             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
+         }
+ 
++        // bestMove came from a tree that may have been built under a
++        // different determinization -- if it has no isomorphic match in the
++        // CURRENT possibleMoves, move is still null here. bestMove itself is
++        // not a safe substitute (it may not be legal in this state), so fall
++        // back to possibleMoves[0], which always is.
++        if (move is null)
++        {
++            _noIsomorphicMatchCount++;
++            if (!_firstNoIsomorphicMatchLogged)
++            {
++                _firstNoIsomorphicMatchLogged = true;
++                BotLog.Write($"SakkirinaGen.Play: bestMove had no isomorphic match in possibleMoves -- " +
++                             $"bestMove.Command={bestMove.Command}, bestMove type={bestMove.GetType().FullName}. " +
++                             $"Falling back to possibleMoves[0].");
++            }
++            move = possibleMoves[0];
++        }
++
+         ProceedTree(move);
+         return move;
+     }

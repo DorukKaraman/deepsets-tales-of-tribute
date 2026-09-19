@@ -10,6 +10,20 @@
     <ItemGroup>
       <ProjectReference Include="..\Engine\TalesOfTribute.csproj" />
       <ProjectReference Include="..\gRPC\gRPC.csproj" />
+      <!-- Forces build ordering (Bots builds before GameRunner) without a
+           compile-time reference, so bots stay dynamically loaded at runtime
+           via reflection (see Program.cs) rather than statically linked. -->
+      <ProjectReference Include="..\Bots\Bots.csproj" ReferenceOutputAssembly="false" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- GameRunner loads Bots.dll by reflection, so NuGet never places
+           OnnxRuntime's assemblies and native library next to it. Referencing
+           the package here is what puts Microsoft.ML.OnnxRuntime.dll and
+           runtimes/<rid>/native/libonnxruntime.* in GameRunner's output, where
+           the dynamically-loaded bot can actually find them. See README,
+           "OnnxRuntime native library caveat". -->
+      <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
     </ItemGroup>
 
 	<ItemGroup>
@@ -23,9 +37,24 @@
     </ItemGroup>
 
     <ItemGroup>
-      <None Update="Bots.dll">
+      <!-- Bots.dll is built, not committed. This item must track GameRunner's
+           own $(Configuration) explicitly: a Debug Bots.dll silently loaded
+           under a Release GameRunner build disables JIT optimizations for the
+           whole bot, which is exactly the kind of thing a wall-clock-budgeted
+           search cannot afford. -->
+      <None Include="..\Bots\bin\$(Configuration)\netstandard2.1\Bots.dll">
+        <Link>Bots\Bots.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- The bots resolve the model against AppContext.BaseDirectory, which
+           for a dynamically-loaded bot is GameRunner's own output directory,
+           not the directory Bots.dll came from. So the model has to land here. -->
+      <None Include="..\models\DeepSetsValueNetwork.onnx">
+        <Link>DeepSetsValueNetwork.onnx</Link>
         <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-		<Link>Bots\Bots.dll</Link>
       </None>
     </ItemGroup>
 

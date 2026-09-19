@@ -1,234 +1,233 @@
-
-- [Announcements: new competition at COG 2025](#announcements-new-competition-at-cog-2025)
-- [Scripts of Tribute Project](#scripts-of-tribute-project)
-  - [Tales of Tribute](#tales-of-tribute)
-  - [Game Version](#game-version)
-  - [Contact](#contact)
-  - [Authors](#authors)
-- [Setup](#setup)
-  - [Step 1: Download the engine](#step-1-download-the-engine)
-  - [Step 2: Choose your IDE](#step-2-choose-your-ide)
-  - [Step 3: .NET SDK](#step-3-net-sdk)
-- [Implementing AI Agent](#implementing-ai-agent)
-  - [Important Classes](#important-classes)
-  - [Overview of Important Objects](#overview-of-important-objects)
-  - [Creating a Bot](#creating-a-bot)
-  - [External Language](#external-language)
-  - [Example Agents](#example-agents)
-  - [Console Game Runner](#console-game-runner)
-- [References](#references)
-- [Legal Notice](#legal-notice)
-
-
-
-# Announcements: new competition at COG 2025
-
-- **Tales of Tribute AI Competition has been accepted for [IEEE Conference on Games 2025](https://cog2025.inesc-id.pt/tales-of-tribute/).**
-- **Deadline for the agent submission is August 10.**
-- **More details about participating, including updates in the game, [here](#ieee-conference-on-games-2025).**
-- **In particular, our framework currently [supports multiple programming languages](#external-language).**
-- **Important note** - engine uses .NET 8.0 now, instead of .NET 7.0, as NET 7.0 is not supported by Microsoft anymore.
-
-
-
-<!--**IEEE Conference on Games 2024 Tales of Tribute AI Competition has ended.**
-
-**See the results and all competition data [here](https://github.com/ScriptsOfTribute/ScriptsOfTribute-CompetitionsArchive/blob/main/competition-2024-08-COG/README.md).**-->
-
-
-<!--**Details regarding 2025 edition will be posted in in the first quarter of the year.**-->
-
-
-
-<!--**Prizes for the winners:  $500USD for the first place, $300USD for the second, $200USD for the third.**-->
-
-
-# Scripts of Tribute Project
-
-Scripts of Tribute (SoT) framework is a Tales of Tribute simulator, implemented in C# .NET Core and allowing to write AI agents and play against them.
-
-
-
-
-A short video describing the 2023 competition is available [HERE](https://www.youtube.com/watch?v=3FxBlZ40l6o) (most info remain up-to-date).
-
-
-To play against the existing bots, download the most recent [GUI binary release](https://github.com/ScriptsOfTribute/ScriptsOfTribute-GUI-2.0/releases) for your OS.
-
-To start developing your own AI agents, check the documentation in [this section](#implementing-ai-agent) and download [SoT-Core project](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core).
-
-Dockerfile for competition environment is available [here](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Dockerfile)
-
-Extended version of the COG 2024 paper describing the competition is available on [arXiv](https://arxiv.org/abs/2305.08234).
-
-<!--Detailed rules of the competition are described in [this section](#ieee-conference-on-games-2024). -->
-
-
-![](https://github.com/ScriptsOfTribute/ScriptsOfTribute-GUI-2.0/blob/main/Docs/screenshots/GameView.png)
-
-
-
-
-## Tales of Tribute
-
-Tales of Tribute is a deck-building game that launched with [The Elder Scrolls Online](https://www.elderscrollsonline.com/en-us/home) High Isle expansion. 
-
-As a source of information about the game, we find the following links helpful (some information in the descriptions might be outdated due to the game patches):
-- [Introducing Tales of Tribute AI Competition](https://arxiv.org/abs/2305.08234), Section IV
-- [game rules](https://eso-hub.com/en/guides/tales-of-tribute-guide)
-- [list of cards and patrons](https://eso-hub.com/en/tales-of-tribute-card-game) (up-to-date)
-- [patron strategies](https://gamerant.com/complete-guide-to-elder-scrolls-online-high-isle-new-gear-bosses-cosmetics-mythics-and-tales-of-tribute/#tales-of-tribute---cards-patrons-and-strategies)
-- [deck guides](https://www.youtube.com/@PinkAppleYT/videos)
-
-
-## Game Version
-
-The current SoT release is compatible with Tales of Tribute from ESO PC/Mac Patch 10.3.5 (10.03.2025). All patron deck cards are fully upgraded.
-
-Cards data used is available in the [cards.json](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/cards.json) file.
-
-
-## Contact
-
-Come to our [Discord](https://discord.gg/RSZjNHuHGm) and talk to us.
-
-## Authors
-
-Jakub Kowalski, Dominik Budzki, Damian Kowalik, Katarzyna Polak,  Radosław Miernik ([University of Wrocław, Institute of Computer Science](https://ii.uni.wroc.pl/)).
-
-
-# Setup
-
-As ScriptsOfTribute Engine is based on the .NET framework, we recommend using Windows as a developing platform. 
-
-
-## Step 1: Download the engine
-
-You can download the source code of the SoT engine from [this repository](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core).
-
-
-## Step 2: Choose your IDE
-
-Any you like. If you choose Visual Studio, make sure that you choose Visual Studio 2022, which supports .NET 8.
-
-
-## Step 3: .NET SDK 
-
-*Skip this if you've chosen Visual Studio.*
-
-To build our engine and create bots with it, you need to install .NET 8 SDK compatible with your operating system. Go to the official page [Download .NET 8.0](https://dotnet.microsoft.com/en-us/download/dotnet/8.0), download, and then install the latest version.
-
-If you are using Linux - here is the [link](https://tecadmin.net/how-to-install-dotnet-core-on-ubuntu-22-04) to the tested tutorial; just change the version in commands from 6.0 to 8.0.
-
-
-# Implementing AI Agent
-
-## Important Classes 
-
-You should familiarize yourself with them before implementing a bot.
-
-1. [AI.cs](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/AI/AI.cs) - abstract class from which your agent should inherit. You have to implement the `SelectPatron` and `Play` methods. In the `EndGame` method, you can add code that should be run after the end of the game, and in `Log` method you can add some logs.
-
-2. All files in [Serializers](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/tree/master/Engine/src/Serializers) folder - by using these classes you can gain access to all visible data of the game - board, hand, tavern, etc. You can start with the `GameState` class - the object of this class you get from the `Play` method. 
-
-Useful files if you want to get access to some important information (cost of a card, amount of power of the opponent, ...) and types of cards, effects, etc:
-
-3. [Move.cs](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/Board/Move.cs)
-4. [Card.cs](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/Board/Cards/Card.cs)
-5. [Agent.cs](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/Board/Cards/Agent.cs)
-6. [UniqueEffects.cs](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/Board/Cards/UniqueEffect.cs)
-
-## Overview of Important Objects
-This section introduces some objects that are used in the engine and knowing them is important for understanding other sections.
-- `EndGameState` – contains information about how the game ended. It has a `Reason` field that indicates why the game ended, which can, for example, be `TURN_TIMEOUT` or `INCORRECT_MOVE`. It also contains `ID` of the winning player (unless the game ended to a reason such as an internal failure) and a string containing additional context about why the game ended, for example, in case of an incorrect move, it contains the move and a list of all other correct moves that were possible and should have been played instead. API functions often return `EndGameState?` – in most cases it is null, but in case the player makes a mistake or his move ends the game, this object is returned to indicate this.
-- `Move` – represents a move that a player can make. It contains a `Type` field, which can be, for example, `PLAY_CARD`, `END_TURN`, or `ACTIVATE_PATRON`. Depending on the type, it also contains additional information, such as the card that is to be played in case of `PLAY_CARD` move. Moves can be created using static methods in `Move` class, for example: `Move.PlayCard(card)`.
-- `Choice` – represents a choice that the player has to make. It can be, for example, a choice of which card to discard. Either cards or effects can be chosen, depending on the card played. This object also contains some information about the choice, including all possible items to choose, how many items need to be chosen, or what the effect of the choice will trigger (for example: destroy the chosen cards).
-- `ChoiceContext` – this object lives inside the `Choice` and holds additional context, including the card and effect, or the patron that triggered the choice.
-
-## Creating a Bot
-
-1. You can either download `dll` library file from [here](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/releases) and use it as normal .NET library or you can clone engine repository and create a file in `ScriptsOfTribute-Core\Bots\src` folder e.g. `MyFirstAgent.cs`. 
-Please remember that your class (in this case, `MyFirstAgent`) should inherit from AI abstract class.
-
-2. Implement the body of `SelectPatron` method.
-Arguments of this method are a list of available patrons and which round of selection of patron it is (first or second). Your method should return `Enum` object of the type `PatronId`.
-
-3. Implement a body of `Play` method
-This method will be run in a loop until you don't return a move that will end your turn, or your bot will try to do not allowed move. The method receives a `GameState` and a list of possible moves and should return one move from that list.
-
-4. [Optional] Implement the body of GameEnd
-This method is called after the game has ended. The purpose
-of this function is to allow the programmer to analyze the data from the `EndGameState` object as they wish.
-
-5. [Optional] Add logs
-To add logs to your bot, call the method `Log` with a string that you want to put in your log. Logs can be shown in the GUI during play.
-
-6. Compile your bot: \
-In case you use our engine through `dll` file just compile your project as library, but if you work inside the reposity just run `dotnet build` in `ScriptsOfTribute-Core\Bots` folder. 
-Created `dll` file is now ready to use either by GameRunner or GUI app.
-
-## External Language
-
-### gRPC
-Our engine supports gRPC connection for external languages. For now we've prepared Python [pip package](https://pypi.org/project/scripts-of-tribute/) that covers whole communication, for details please check repository with the [source code](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Python) and provided examples there on how to use this library.
-
-### **OBSOLETE** Communication via standart input/output
-There's a possibility to use different language than C# to create a bot thanks to [ExternalAIAdadpter](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/AI/ExternalAIAdapter.cs). For now engine is built to work with Python files, but enabling other languages is easy. In such cases please contact us.
-If you plan to create a bot in different language you have to parse game state from stdin which will come in json format ending with EOT string as an "End of Transmission" sign. Forming this object is done in [Game State class](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Engine/src/Serializers/GameState.cs) in `SerializeGameState` method. To understand more how these objects look please check [tests](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Tests/utils/JSONSerializeTests.cs). In case of any problem fastest way to get help or any information is through our [discord](https://discord.gg/RSZjNHuHGm).
-
-## Example Agents
-
-Feel free to study our [example agents](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/tree/master/Bots/src), to familiarize yourself more with the infrastructure of the project. You can also use code from them to create your own code. 
-
-Bots whose understanding can help you implement your own agents:
-1. [RandomBot](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Bots/src/RandomBot.cs)
-2. [MaxPrestigeBot](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/blob/master/Bots/src/MaxPrestigeBot.cs) Focus on the usage of `gameState.ApplyMove()` - this function allows you to simulate a move. If you provide a seed, you can simulate a random playout based on that seed. When running this method without a seed you will receive `GameState` and available moves without any random events (like a card that you could draw, a new card in the tavern after buying/removing the card, etc.)
-
-
-## Console Game Runner 
-
-Game Runner is a command-line application that allows the user to load bots from DLLs and run games between them.
-
-Usage: `GameRunner <NameOfBot1> <NameOfBot2> <flags>`
-for example: `GameRunner RandomBot RandomBot -n 1000 -t 2` will run 1000 games between two `RandomBot`s using two threads
-
-For more flags and usage help, run `GameRunner -h`
-
-To run game with bot made in different language, for example python via gRPC use `grpc:` before bot's name. For example: `GameRunner RandomBot grpc:RandomBot -n 1000 -t 2`
-
-It is available for download [here](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core/releases) for Windows, Linux and MacOS
-
-# References
-
-The Tales of Tribute AI Competition has been described in [this article](https://arxiv.org/abs/2305.08234).
-
-Please cite as follows:
-
-```
-@inproceedings{Kowalski2024IntroducingTales,
-  author = {Kowalski, J. and Miernik, R. and Polak, K. and Budzki, D. and Kowalik D.},
-  title = {{Introducing Tales of Tribute AI Competition}},
-  booktitle = {IEEE Conference on Games},
-  pages = {1--8},
-  year = {2024},
-}
-```
-Initial version of the ScriptsOfTribute has been described in [engineer's thesis](https://jakubkowalski.tech/Supervising/Budzki2023ImplementingTalesOfTribute.pdf).
-```
-@mastersthesis{Budzki2023ImplementingTalesOfTribute,
-  title={{Implementing Tales of Tribute as a Programming Game}},
-  author={Budzki, Dominik and Kowalik, Damian and Polak, Katarzyna},
-  type={Engineer's Thesis},
-  year={2023},
-  school={University of Wroc{\l}aw}
-}
+# DeepSetsBot and DeepSetsBlendBot
+
+Two Monte Carlo tree search agents for *Tales of Tribute* whose state evaluation
+comes from a DeepSets neural network instead of a hand-crafted heuristic. They
+took **the top two places of eight entrants** in the 2026 Tales of Tribute AI
+Competition (IEEE CoG): `DeepSetsBlendBot` first with **69.21%** and
+`DeepSetsBot` second with **68.24%**, over 5460 official games each.
+
+This repository accompanies the paper and contains everything needed to
+reproduce that work: the agents, the trained model, the training pipeline, and
+the verification and benchmarking harnesses. Start with
+**[REPRODUCE.md](REPRODUCE.md)** for the end-to-end pipeline.
+
+It is a fork of [ScriptsOfTribute-Core](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core),
+the official competition engine. The upstream project's own README is preserved
+at [docs/upstream-README.md](docs/upstream-README.md).
+
+---
+
+## The agents
+
+Each visible card is encoded as a 99-dimensional vector and passed through a
+shared per-card encoder; the results are mean-pooled, concatenated with a
+19-dimensional encoding of non-card state, and passed through an MLP that
+outputs a win probability. The network was trained by supervised learning on
+game outcomes, using the competition's six-patron set (ANSEI, DUKE_OF_CROWS,
+RAJHIN, ORGNUM, PELIN, SAINT_ALESSIA).
+
+| Agent | Evaluation |
+|---|---|
+| `DeepSetsBot` | The network alone. |
+| `DeepSetsBlendBot` | Blends a heuristic evaluation into the network's during the early game, decaying linearly to pure network by mid-game. |
+
+The blend exists because the network's validation AUC is weakest early (0.797
+in the lowest prestige-clock bucket, against 0.971 in the highest), which is
+exactly where hand-tuned economy knowledge is most useful.
+
+Patron selection is uniformly random in both agents.
+
+## Results
+
+**Official tournament (2026 Tales of Tribute AI Competition, 5460 games each):**
+
+| Agent | Placing | Win rate |
+|---|---|---|
+| `DeepSetsBlendBot` | 1st of 8 | 69.21% |
+| `DeepSetsBot` | 2nd of 8 | 68.24% |
+
+Those percentages are win rates **across the whole tournament field**, not
+against any single opponent. They are the paper's headline result, and nothing
+in this repository reproduces them — the harnesses here reproduce our own local
+measurements, which ran optimistic in every head-to-head we can compare (by
+5.7 points against SakkirinaSolo and 18.5 against BestMCTS3).
+[REPRODUCE.md](REPRODUCE.md#which-numbers-come-from-where) gives the full
+comparison; please read it before citing any win rate from this repository.
+
+## Attribution
+
+**The search is not ours.** It derives from **SakkirinaSolo**, the 2025
+competition winner: move generation, the tree search, tree reuse, the
+rule-based fast paths, move deduplication, and the simulation policy that seeds
+node priors are all unchanged from it. Our contribution is the evaluation
+function and everything feeding it. Specifically, we replaced SakkirinaSolo's
+static `Evaluate()` with the neural evaluator and fixed a null-return bug in
+`Play()`; `DeepSetsBlendBot` additionally reuses SakkirinaSolo's own heuristic
+evaluation as its early-game blend component.
+
+The move-hashing utilities (`MoveComparer`) originate in **BestMCTS3** and
+reached our code through SakkirinaSolo, which carries them with its author's
+acknowledgement. We carry that acknowledgement forward.
+
+Ours are:
+
+- the DeepSets value network architecture;
+- the 99-dimensional per-card and 19-dimensional global state encoding;
+- the data-generation, training, export and cross-language verification
+  pipeline that produced the shipped weights.
+
+### Derived work versus redistribution
+
+`Bots/src/DeepSetsBot.cs` and `DeepSetsBlendBot.cs` contain SakkirinaSolo's
+search and are published here as derived works, attributed above and in
+[docs/SUBMISSION.md](docs/SUBMISSION.md); that is the same form in which they
+were submitted to the competition. Distributing an agent that is *substantially
+unmodified* SakkirinaSolo under a new name would be republishing someone else's
+competition entry rather than building on it, so we do not do that: the
+baselines are fetched from the official archive rather than copied into this
+repository, and the two agents of ours that are near-verbatim SakkirinaSolo
+(`SakkirinaGen`, 39 of 885 lines changed; `SakkirinaHalf`, 36 of 872) ship as
+patches against the author's own file instead of as source.
+
+## Third-party agents
+
+`SakkirinaSolo` and `BestMCTS3` are other people's competition submissions. They
+are **not** in this repository and are **not** covered by its licence; they
+remain the work of their respective authors. To reproduce any baseline
+comparison, fetch them from the official competition archive:
+
+```bash
+./scripts/fetch_baselines.sh
 ```
 
+This clones the
+[ScriptsOfTribute-CompetitionsArchive](https://github.com/ScriptsOfTribute/ScriptsOfTribute-CompetitionsArchive)
+at a pinned commit, verifies each file against a recorded SHA-256, copies the
+eight files into `Bots/src/`, and derives `SakkirinaGen.cs` and
+`SakkirinaHalf.cs` by applying `scripts/*.patch`. The fetched and derived files
+are listed in `.gitignore`; do not commit them.
 
-# Legal Notice
+**Building and running `DeepSetsBot` / `DeepSetsBlendBot` does not require
+this.** Only baseline comparisons do.
 
-This competition is neither directly nor indirectly related to Bethesda Softworks, ZeniMax Online Studios, nor parent company ZeniMax Media, in any way, shape, or form.
+## Build
 
-It is based on the Scripts of Tribute framework, which mimics the game Tales of Tribute and provides access points for the development of AI agents. The framework does not allow to play the original game, nor does it connect to the game’s servers in any way.
+Requires the .NET 8 SDK.
 
-The Elder Scrolls® Online developed by ZeniMax Online Studios LLC, a ZeniMax Media company. ZeniMax, The Elder Scrolls, ESO, Bethesda, Bethesda Softworks and related logos are registered trademarks or trademarks of ZeniMax Media Inc. in the US and/or other countries. All Rights Reserved.
+```bash
+dotnet build TalesOfTribute.sln -c Release
+```
+
+Run a game:
+
+```bash
+cd GameRunner/bin/Release/net8.0
+./GameRunner DeepSetsBot DeepSetsBlendBot -n 1 -to 10 \
+    -p ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA
+```
+
+Set `SOT_LOG=1` to have the agents write a log; the `PregamePrepare` line
+records the resolved model path and its SHA-256.
+
+### The OnnxRuntime native library caveat
+
+**If the model fails to load, the agents do not crash — they silently fall back
+to the heuristic evaluator and play substantially worse.** A run that looks
+fine can therefore be measuring the wrong agent entirely. This is the single
+most likely thing to go wrong, so it is worth understanding.
+
+`GameRunner` loads `Bots.dll` dynamically by reflection rather than through a
+compile-time project reference, so NuGet's normal dependency resolution never
+places OnnxRuntime's assemblies next to the running executable. Three things
+must reach `GameRunner`'s output directory:
+
+- `Microsoft.ML.OnnxRuntime.dll`
+- `Newtonsoft.Json.dll`
+- `runtimes/<rid>/native/libonnxruntime.*`
+
+`GameRunner.csproj` in this repository already arranges that by referencing the
+`Microsoft.ML.OnnxRuntime` package directly (CPU inference only; no GPU or CUDA
+execution provider is used). If you build the agents into a different host,
+you must arrange it yourself.
+
+### Where the model has to sit
+
+The loader tries three candidates in order:
+
+1. `AppContext.BaseDirectory/DeepSetsValueNetwork.onnx`
+2. `./DeepSetsValueNetwork.onnx` (current working directory)
+3. `../Bots/DeepSetsValueNetwork.onnx`
+
+**It resolves on candidate 1, the primary path — not on a fallback.** We
+verified this explicitly by running from a working directory where neither
+candidate 2 nor 3 exists; the model still loaded. This matters because
+`models/` is not itself on that list: the model reaches the agent because
+`GameRunner.csproj` copies `models/DeepSetsValueNetwork.onnx` into
+`GameRunner`'s output directory at build time, and for a bot loaded
+dynamically into `GameRunner`, `AppContext.BaseDirectory` is **the directory
+the `GameRunner` executable itself sits in** — not the directory `Bots.dll`
+was loaded from.
+
+So the layout does not depend on the working directory you launch from, and
+does not depend on the fallbacks. If you build the agents into a different
+host, put the model next to that host's executable.
+
+To confirm the model loaded rather than silently falling back, run with
+`SOT_LOG=1` and check the `PregamePrepare` line reports
+`sha256=86e0f9a8...`.
+
+## Model artefacts
+
+`models/SHA256SUMS` records all three; verify with `shasum -a 256 -c SHA256SUMS`.
+
+| File | SHA-256 | What it is |
+|---|---|---|
+| `DeepSetsValueNetwork.onnx` | `86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915` | The shipped model. This exact file produced the tournament result. |
+| `deepsets_value_network.pth` | `3bd14d4e069d47267721cc4765d1d6e94fe5c1b702fa552fe3c445a175f7b66b` | The PyTorch checkpoint the ONNX was exported from. All 12 weight tensors are bit-identical to the ONNX's initializers. |
+| `ablation_heuristic_only.pth` | `0fff37d6c89cc74e86f1c8b2b314aca31752295c66daacdd217f351257568774` | **Not the submitted model.** Trained on heuristic-generated data alone; one arm of an ablation the paper reports. |
+| `ablation_heuristic_only_metrics.json` | see `SHA256SUMS` | Training curves for the checkpoint above — 3 epochs, best val accuracy 0.8050, best val loss 0.4034. |
+
+No training metrics survive for the shipped model; the figures above belong to
+the ablation arm and should not be attributed to it. See
+[REPRODUCE.md](REPRODUCE.md#3-train).
+
+The ONNX file reports `producer: pytorch 2.2.2`. Reproducing its *byte* hash
+requires that version; see
+[REPRODUCE.md](REPRODUCE.md#reproducing-the-model-file-byte-for-byte).
+
+## Layout
+
+Ours:
+
+| Path | Contents |
+|---|---|
+| `Bots/src/DeepSets*.cs` | The two agents and their shared infrastructure (`DeepSetsCore.cs`: feature extraction, ONNX inference, card metadata). |
+| `Bots/src/SakkirinaGenNeural.cs` | Self-play data-generation agent. |
+| `models/` | The trained model, its checkpoint, the ablation checkpoint, and their hashes. |
+| `training/` | Feature schema (`StateParser.py`), network definition, training, ONNX export, card-database generation and audit. |
+| `tools/` | Data generation, dataset splitting, cross-language parity verification, benchmarking. |
+| `experiments/` | Control conditions and null results reported in the paper. See [experiments/README.md](experiments/README.md). |
+| `scripts/` | Baseline fetching, the two SakkirinaSolo patches, and SLURM templates. |
+
+Upstream (unmodified unless noted): `Engine/`, `gRPC/`, `Tests/`,
+`ModuleTests/`, `BotsTests/`, `Bots/src/` (all other bots).
+`GameRunner/` is upstream plus our `--log-training-data` / `--data-dir` options
+and the OnnxRuntime wiring described above.
+
+### The dual-language feature schema
+
+The node and global feature vectors are defined **twice** — in
+`training/StateParser.py` for training, and in the `FeatureExtractor` class in
+`Bots/src/DeepSetsCore.cs` for inference. They must agree exactly or the agent
+plays on features the network was never trained on. `tools/verify_parity.py`
+checks this by running both real implementations against the same logged states
+and diffing the outputs column by column. Any change to either file must be
+mirrored in the other, and the parity check must pass.
+
+## Licence
+
+This repository is MIT licensed (see [LICENSE](LICENSE)), inherited from
+upstream ScriptsOfTribute-Core, © 2022 Ematerasu. The licence covers upstream's
+code and ours. It does **not** cover the third-party competition agents
+described under [Third-party agents](#third-party-agents), which are not
+distributed here.

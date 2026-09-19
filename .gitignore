@@ -352,3 +352,28 @@ MigrationBackup/
 # Rider
 .idea/
 /GameRunner/Properties/launchSettings.json
+
+# --- DeepSets agent repo ---
+**/.DS_Store
+**/*.gz
+GameRunner/Bots.dll
+GameRunner/patrons*.txt
+GameRunner/*.log
+patrons*.txt
+tools/out/
+training_data/
+benchmark_results/
+
+# Third-party baseline agents, fetched by scripts/fetch_baselines.sh.
+# Not ours to redistribute -- see README.md, "Third-party agents".
+Bots/src/SakkirinaSolo.cs
+Bots/src/BestMCTS3.cs
+Bots/src/GameStrategy.cs
+Bots/src/InstantPlayCards.cs
+Bots/src/TierList.cs
+Bots/src/AgentTierList.cs
+Bots/src/HandTierList.cs
+Bots/src/PatronTierList.cs
+# Derived from the fetched SakkirinaSolo.cs by scripts/*.patch
+Bots/src/SakkirinaGen.cs
+Bots/src/SakkirinaHalf.cs
