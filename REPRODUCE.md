@@ -23,15 +23,22 @@ reproduce our own local measurements.
 Matching local measurements against the corresponding tournament head-to-head
 results:
 
-| Matchup | Local estimate | Tournament | Gap |
-|---|---|---|---|
-| `DeepSetsBot` vs SakkirinaSolo | 76.3% | 70.6% | **+5.7** |
-| `DeepSetsBot` vs BestMCTS3 | 88.0% | 69.5% | **+18.5** |
+| Matchup | Games | Measured on | Local estimate | Tournament | Gap |
+|---|---|---|---|---|---|
+| `DeepSetsBot` vs SakkirinaSolo | 400 | cluster | 76.3% | 70.6% | **+5.7** |
+| `DeepSetsBot` vs BestMCTS3 | 150 | laptop | 88.0% | 69.5% | **+18.5** |
 
-Local figures are 400 games per matchup at 10s/turn with seats swapped. The
-overestimate is mild against SakkirinaSolo and **severe against BestMCTS3** —
-nearly 19 points. Treat any local number in this repository as an upper bound,
-and do not assume the bias is uniform across opponents: it plainly is not.
+The overestimate is mild against SakkirinaSolo and **severe against
+BestMCTS3** — nearly 19 points. Treat any local number in this repository as an
+upper bound, and do not assume the bias is uniform across opponents: it plainly
+is not.
+
+The two rows are not equally strong evidence. The BestMCTS3 row is 150 games on
+an unmanaged laptop, so it carries both a wider interval and whatever timing
+noise a laptop contributes to a wall-clock-budgeted search; the SakkirinaSolo
+row is 400 cluster games. The +18.5 gap is large enough that it is unlikely to
+be an artefact of either, but it is the less carefully measured of the two and
+should be re-measured on the cluster before it is leaned on.
 
 Do **not** compare a local head-to-head figure against 69.21% or 68.24%. Those
 are field-wide averages and are not the right denominator for a single matchup.
@@ -43,6 +50,40 @@ So, when citing:
   as such, expected to be optimistic by an opponent-dependent margin.
 - Ablations and controls comparing our own variants against each other →
   local, but like-for-like, so the bias largely cancels.
+
+## This fork's engine is not identical to the competition's
+
+Two changes were made outside our own code so that the experiment harness could
+report what it needs to. Both affect **only how finished games are tallied and
+reported — neither changes how a game is played, scored or won.** No rule, no
+move legality, no winner determination is touched. Numbers produced here remain
+comparable to numbers produced on the competition's engine.
+
+They are recorded here because they mean this fork's engine is no longer
+byte-identical to the one the competition runs, and anyone diffing against
+upstream should know why.
+
+**`Engine/src/utils/GameEndStatsCounter.cs` — counts `PREPARE_TIME_EXCEEDED`
+instead of throwing on it.** `GameEndReason.PREPARE_TIME_EXCEEDED` was missing
+from the counter's `switch`, so it fell through to `default` and threw
+`ArgumentOutOfRangeException`, killing the whole process instead of counting one
+game. It was latent upstream because nothing reached it: a bot's
+`PregamePrepare` has the full per-turn timeout to finish, and at the usual 10 s
+that is far more than the DeepSets agents need to build an ONNX
+`InferenceSession`. [`experiments/configs/time_scaling.json`](experiments/configs/time_scaling.json)
+runs `--timeout` as low as 4 s, which makes it reachable on a loaded node. It
+now falls into the same "other factors" bucket as the other non-clean end
+reasons.
+
+**`GameRunner/Program.cs` — prints one `GAME_END_REASON: <reason> WINNER:
+<winner>` line per game.** `GameEndStatsCounter` pools `TURN_TIMEOUT`,
+`INCORRECT_MOVE`, `BOT_EXCEPTION`, `INTERNAL_ERROR` and both
+`PATRON_SELECTION_*` reasons together as "other factors". That is fine for a
+self-play data run and useless for a benchmark at a 2 s budget, where a game
+lost to a timeout is not a game lost to play and the two have to be reported
+separately. The line is additive — every existing parser matches its own lines
+by regex — and `tools/benchmark_cluster.py` uses it to classify each game as
+clean / turn_limit / timeout / disqualification.
 
 ## Prerequisites
 
@@ -111,20 +152,31 @@ non-overlapping seed range. It is resumable: re-running skips completed tasks.
 
 The shipped model was trained on a **combined** dataset from two runs:
 
-| Run | Generating agent | `--seed-base` | Notes |
-|---|---|---|---|
-| Heuristic | `SakkirinaGen` | `20260803` | Derived from SakkirinaSolo by `scripts/sakkirina_gen.patch`. |
-| Neural self-play | `SakkirinaGenNeural` | `20260807` | ~12,000 games. |
+| Run | Generating agent | `--seed-base` | Games | Notes |
+|---|---|---|---|---|
+| Heuristic | `SakkirinaGen` | `20260803` | 6,080 | Derived from SakkirinaSolo by `scripts/sakkirina_gen.patch`. |
+| Neural self-play | `SakkirinaGenNeural` | `20260807` | 6,080 | |
+
+**12,160 games combined**, an even split between the two runs.
 
 `tools/generate_data.sh` adds `task_id * 1000000` to the seed base per task, so
 the two runs' seed ranges cannot collide. The benchmark run used seed base
 `20260808`.
 
-Because the seed bases are recorded, **the games themselves are reproducible**:
-the same seed base and task layout regenerate the same games. What is *not*
-reproducible is the `game_id` label, which `GameRunner` builds as
-`{processId}_{threadNo}_{counter}` — the OS process id differs on every run.
-See [Known limitations](#known-limitations) for why that still matters.
+**The seeds regenerate, the games do not.** A seed fixes the initial deal and
+the engine's own RNG stream, so a rerun starts from the same position. It does
+not fix what gets played: both generating agents are wall-clock budgeted
+(`while (s.Elapsed < timeForMoveComputation) TreeSearch(...)`), so how many
+search iterations fit into a move depends on machine load, JIT warm-up and GC,
+and two runs of the *same binary* on the *same seed* can pick different moves
+and then diverge permanently. This is measured, not hypothetical:
+`experiments/verify_exp_bot_parity.py --self-check` runs one frozen agent
+against itself twice from one seed and the two games diverged at move 5.
+
+So a regenerated dataset is **similar in distribution, not identical**: same
+openings, different play, different outcomes. Retraining on it should land close
+to the shipped model, not on top of it. See
+[Known limitations](#known-limitations).
 
 Runtime: ~80s per game per core for the neural agent, ~48s for the heuristic
 one on cluster hardware. At the template's defaults, ~6000 games across 32
@@ -356,12 +408,13 @@ it is still not skippable.
 
 ## 7. Paper experiments
 
-Three experiments, one harness, one build. Each is a JSON config in
+Three questions across four configs — equal effort is asked twice, once from
+each direction. One harness, one build. Each config is a JSON file in
 [`experiments/configs/`](experiments/configs/) — see
 [that directory's README](experiments/configs/README.md) for the format, and
 [`experiments/README.md`](experiments/README.md) for the agents they use.
 
-All three run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
+All four run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
 environment hooks and nothing else changed. The submitted agents stay
 byte-identical; `SOT_ALPHA0=0` makes the copy behave as `DeepSetsBot` and the
 default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
@@ -370,20 +423,64 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 |---|---|---|
 | `alpha_sweep` | How much of the advantage is the blend versus the network alone? | 2000 |
 | `time_scaling` | Does the advantage hold as the per-turn budget moves 2 s → 30 s? | 2000 |
-| `equal_effort` | Is the network better, or is the baseline just searching more? | 400 |
+| `equal_effort` | Is the network better, or is the baseline just searching more? Treatment sped up. | 400 |
+| `equal_effort_baseline_slowed` | The same question, baseline slowed down instead. | 400 |
+
+### Equal effort is run in both directions
+
+`equal_effort` and `equal_effort_baseline_slowed` target the same ratio —
+evaluations per turn, matched — and move opposite sides to get there. **Both are
+run, because neither is decisive alone.**
+
+Speeding the treatment up keeps the baseline at exactly the timing its author
+tuned it for, but hands `DeepSetsBotExp` a per-turn budget no tournament would
+give it (~78 s at the pilot ratio), so the agent measured is not the agent
+submitted — and it costs roughly 8× the wall clock of any other row.
+
+Slowing the baseline down keeps `DeepSetsBotExp` at exactly its competing
+timing and costs no more than a normal row, but runs SakkirinaSolo's search at
+about an eighth of the budget it was designed around. A hand-tuned heuristic
+agent may degrade non-linearly there: its rule-based fast paths and tree reuse
+do not scale with the clock, so the *shape* of its play changes, not only its
+depth.
+
+Each direction carries a distortion the other does not, and they are different
+kinds of distortion. What carries weight is **agreement**. If both move the win
+rate the same way, the conclusion is robust to which side was moved. If they
+disagree, that is the finding: evaluations per turn is not the right currency
+for "effort" here, and the framing needs rethinking before either number is
+reported.
+
+**Run the baseline-slowed direction first.** It is cheap, and if it already
+answers the question the expensive direction becomes a confirmation rather than
+the primary evidence. One `--calibrate` run serves both: it measures the ratio
+*r*, and the two configs apply it to opposite sides — `equal_effort` sets
+`SOT_TIME_SCALE = r`, `equal_effort_baseline_slowed` sets
+`SOT_BASELINE_TIME_SCALE = 1/r`. The harness prints *r*, so remember to take the
+reciprocal for the second one.
 
 ### Cluster commands, in order
 
 ```bash
 # --- once, on the login node ---
+# Clone FRESH, into a NEW directory. Do not pull into an existing
+# $HOME/tot/ScriptsOfTribute-Core: that is a different, older repository, and
+# none of the experiment configs, agents or harness changes below exist in it.
 source $HOME/tot/env.sh
-cd $HOME/tot/ScriptsOfTribute-Core
-git pull
+mkdir -p $HOME/tot
+git clone -b experiments \
+    https://github.com/DorukKaraman/deepsets-tales-of-tribute.git \
+    $HOME/tot/deepsets-tales-of-tribute
+cd $HOME/tot/deepsets-tales-of-tribute
+
 ./scripts/fetch_baselines.sh                      # SakkirinaSolo + SakkirinaScaled
 dotnet build Bots/Bots.csproj       -c Release
 dotnet build GameRunner/GameRunner.csproj -c Release
 mkdir -p logs                                     # SLURM will NOT create this for you
 
+# scripts/slurm_experiment.sh defaults REPO_ROOT to this path. If you cloned
+# somewhere else, edit it there too, or every array task will look in the wrong
+# place.
 export OUT_DIR=$HOME/tot/experiment_results
 
 # --- 1. alpha sweep ---
@@ -398,14 +495,38 @@ sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=0-1599%32 --time=00:20:0
 sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=1600-1999%32 --time=00:30:00 scripts/slurm_experiment.sh
 python tools/aggregate_benchmark_results.py --config time_scaling --out-dir "$OUT_DIR/time_scaling"
 
-# --- 3. equal effort: CALIBRATE FIRST, the config ships unrunnable ---
-tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR/equal_effort" --calibrate
-#   -> put the suggested SOT_TIME_SCALE into experiments/configs/equal_effort.json,
-#      set that matchup's "timeout" to ceil(9.8 * scale) + 2, then re-run
-#      --calibrate to confirm the two evals/turn figures actually meet.
-sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort --array=0-399%32 scripts/slurm_experiment.sh
+# --- 3. equal effort: CALIBRATE FIRST, both configs ship unrunnable ---
+# One calibration serves both directions. It prints the ratio r.
+tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
+    --out-dir "$OUT_DIR/equal_effort_baseline_slowed" --calibrate
+
+# --- 3a. baseline slowed down. Cheap. Run this one first. ---
+#   -> set SOT_BASELINE_TIME_SCALE = 1/r (the RECIPROCAL of the printed suggestion)
+#      in experiments/configs/equal_effort_baseline_slowed.json. timeout stays 12.
+#      Re-run --calibrate to confirm the two evals/turn figures meet.
+sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort_baseline_slowed \
+    --array=0-399%32 --time=00:15:00 scripts/slurm_experiment.sh
+python tools/aggregate_benchmark_results.py --config equal_effort_baseline_slowed \
+    --out-dir "$OUT_DIR/equal_effort_baseline_slowed"
+
+# --- 3b. treatment sped up. Expensive: ~18 min/game, ~120 core-hours for 400. ---
+#   -> put the suggested SOT_TIME_SCALE (r itself) into
+#      experiments/configs/equal_effort.json, set that matchup's "timeout" to
+#      ceil(9.8 * r) + 2, then re-run --calibrate to confirm.
+sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort \
+    --array=0-399%32 --time=00:45:00 scripts/slurm_experiment.sh
 python tools/aggregate_benchmark_results.py --config equal_effort --out-dir "$OUT_DIR/equal_effort"
 ```
+
+**`--time` is not optional on 3b.** `slurm_experiment.sh` defaults to
+`00:30:00`, sized for the 30 s rows of `time_scaling`. At the pilot ratio a
+single equal-effort game runs about **18 minutes** — `DeepSetsBotExp` gets a
+~78 s per-turn budget, so a normal-length game takes roughly 8× the usual wall
+clock — and every task would be killed at the 30-minute default with no result
+file. `00:45:00` leaves margin for a long game without over-requesting. Budget
+**~120 core-hours** for the 400 games (400 × 18 min); at `%32` that is about
+4 hours of wall clock. The baseline-slowed direction costs a normal row's
+worth, which is why it is worth running first.
 
 `--array` may exceed the site's `MaxArraySize`
 (`scontrol show config | grep -i MaxArraySize`); submit in chunks if so. Every
@@ -448,6 +569,29 @@ differ: first-player advantage is real and correlates with the outcome label, so
 a set generated entirely with one agent in seat P1 would hand every metric a
 systematic bias.
 
+**That command sets no `SOT_ALPHA0`, so `DeepSetsBotExp` runs at its default
+`0.7` — the set is generated by the *blend* agent, not the network-only one.**
+That is a deliberate choice, not an oversight: the blend is the submitted
+1st-place agent, so its games are the states a deployed model actually has to
+evaluate. But it does mean the states are drawn from a policy that consults the
+heuristic early, and a model scored on them is being asked about that
+distribution specifically.
+
+To generate from the pure-network agent instead, export the variable before
+calling the script — `tools/generate_data.py` passes the ambient environment
+straight through to `GameRunner`, so it reaches the bot:
+
+```bash
+SOT_ALPHA0=0 tools/generate_data.sh --games 2000 --out-dir "$HPCWORK/heldout_a0" \
+    --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base 20260927
+```
+
+Note this is the one place in the pipeline where a `SOT_*` variable is read from
+the ambient shell. The benchmark harness deliberately strips them
+(`tools/benchmark_cluster.py`'s `build_env`) so a stray export cannot leak into
+a run that never asked for it; the generation path has no such guard, which
+makes it usable here and worth being careful about elsewhere.
+
 `tools/evaluate_checkpoints.py` reports loss, accuracy, AUC and Brier per
 checkpoint, overall and by prestige-clock bucket, each against that slice's
 majority-class baseline — the same buckets `train_local.py` prints during
@@ -465,13 +609,22 @@ agent actually runs.
   recorded.** Only the checkpoint and the exported ONNX survive from that run.
 - **Byte-identical ONNX export requires PyTorch 2.2.2.** The model itself
   reproduces exactly on any version; only the file hash does not.
-- **Training data is not distributed** (several GB) but is regenerable, and the
-  seed bases are recorded above, so the *games* regenerate identically. What
-  does not carry over is the `game_id`, which embeds the OS process id. Since
-  `tools/split_dataset.py` partitions on the sorted set of `game_id`s before
-  shuffling, a regenerated dataset gets a **different train/val partition even
-  with the same `--seed`**. A model retrained from a fresh dataset should
-  therefore land close to the shipped one, not identical to it.
+- **Training data is not distributed** (several GB) and regenerates only
+  approximately. The seed bases are recorded above, so a rerun starts from the
+  same deals — but the generating agents are wall-clock budgeted, so they do not
+  replay the same moves, and the games that come out are different games with
+  the same openings. The dataset is reproducible in distribution, not in
+  content.
+
+  Two independent things therefore differ on a regenerated dataset, and both
+  push the same way. The records themselves are different, because the play was
+  different. And the `game_id` labels are different, because `GameRunner` builds
+  them as `{processId}_{threadNo}_{counter}` and the OS process id changes every
+  run — which matters because `tools/split_dataset.py` partitions on the sorted
+  set of `game_id`s, so **even the same records would land in a different
+  train/val split at the same `--seed`**. A model retrained from a fresh dataset
+  should land close to the shipped one, not identical to it, and a difference of
+  a point or two is expected rather than evidence of a bug.
 - **`DeepSetsBotExp` cannot be proven move-identical to `DeepSetsBlendBot`.**
   The search is wall-clock budgeted, so two runs of the *same* binary on the
   same seed can diverge. `experiments/verify_exp_bot_parity.py --self-check`
@@ -488,4 +641,8 @@ agent actually runs.
   approximately linear in the time budget — tree reuse and the rule-based fast
   paths do not scale with the clock — so the matching `SOT_TIME_SCALE` is found
   by iterating `--calibrate`, and how closely the two agents actually meet
-  should be reported alongside the win rate.
+  should be reported alongside the win rate. Calibrate at `SOT_ALPHA0=0`: above
+  0, one counted evaluation runs *both* evaluators inside the blend window, so
+  the counter measures the same event on both sides but not the same work.
+- **The engine is not byte-identical to the competition's.** Two tallying-only
+  changes; see [above](#this-forks-engine-is-not-identical-to-the-competitions).

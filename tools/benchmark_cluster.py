@@ -110,6 +110,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -452,6 +453,20 @@ def resolve_offender(winner):
     return "unknown"
 
 
+def mean(values):
+    return sum(values) / len(values) if values else 0.0
+
+
+def stdev(values):
+    """Sample standard deviation; 0.0 for fewer than two values. Reported
+    alongside every calibration mean because the per-game spread here is wide
+    enough that a mean over a handful of games can be misleading on its own."""
+    if len(values) < 2:
+        return 0.0
+    m = mean(values)
+    return math.sqrt(sum((v - m) ** 2 for v in values) / (len(values) - 1))
+
+
 def proc_timeout_for(task):
     """Safety-net subprocess watchdog. SLURM's own --time is the real per-task
     limit; this just makes sure a hang doesn't also wedge whatever invoked this
@@ -760,35 +775,68 @@ def run_calibration(config, binary, out_dir, games_override):
         by_matchup.setdefault(task["matchup"], []).append(result)
 
     for label, results in by_matchup.items():
-        per_class = {}
+        # Per turn AND per game. They are not redundant: per-turn is the figure
+        # equal-effort matching is defined on, but per-game is what earlier
+        # measurements in this repository reported, and the two only agree if
+        # both agents played the same number of turns -- which is worth seeing
+        # rather than assuming. The turn counts are printed for that reason.
+        per_turn, per_game, turns = {}, {}, {}
         for r in results:
             for cls, stats in (r.get("evals_per_turn") or {}).items():
-                per_class.setdefault(cls, []).append(stats["mean_evals_per_turn"])
+                per_turn.setdefault(cls, []).append(stats["mean_evals_per_turn"])
+                per_game.setdefault(cls, []).append(stats["total_evals"])
+                turns.setdefault(cls, []).append(stats["turns"])
         print(f"[{label}]  n={len(results)} game(s)")
-        if not per_class:
+        if not per_turn:
             print("  no agent in this matchup reported evaluations per turn "
                   "(neither side is DeepSetsBotExp or SakkirinaScaled?)")
             print()
             continue
         env = results[0].get("env") or {}
         print(f"  env: {' '.join(f'{k}={v}' for k, v in sorted(env.items())) or '(none)'}")
-        for cls, means in sorted(per_class.items()):
-            mean = sum(means) / len(means)
-            lo, hi = min(means), max(means)
-            print(f"  {cls:<24} mean {mean:>12.1f} evals/turn   (per-game range {lo:.1f} .. {hi:.1f}, "
-                  f"n={len(means)})")
+        print()
+        header = (f"  {'agent':<22}{'evals/turn':>14}{'sd':>11}{'min':>11}{'max':>11}"
+                  f"{'evals/game':>13}{'turns':>8}")
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for cls in sorted(per_turn):
+            print(f"  {cls:<22}{mean(per_turn[cls]):>14.1f}{stdev(per_turn[cls]):>11.1f}"
+                  f"{min(per_turn[cls]):>11.1f}{max(per_turn[cls]):>11.1f}"
+                  f"{mean(per_game[cls]):>13.0f}{mean(turns[cls]):>8.1f}")
 
-        exp_cls = next((c for c in per_class if c.startswith("DeepSets")), None)
-        base_cls = next((c for c in per_class if c != exp_cls), None)
+        exp_cls = next((c for c in per_turn if c.startswith("DeepSets")), None)
+        base_cls = next((c for c in per_turn if c != exp_cls), None)
         if exp_cls and base_cls:
-            exp_mean = sum(per_class[exp_cls]) / len(per_class[exp_cls])
-            base_mean = sum(per_class[base_cls]) / len(per_class[base_cls])
-            if exp_mean > 0:
-                ratio = base_mean / exp_mean
+            exp_turn, base_turn = mean(per_turn[exp_cls]), mean(per_turn[base_cls])
+            exp_game, base_game = mean(per_game[exp_cls]), mean(per_game[base_cls])
+            # Per-game ratio per game, then averaged, rather than a ratio of
+            # averages: a single long game would otherwise dominate.
+            paired = [b / a for a, b in zip(per_game[exp_cls], per_game[base_cls]) if a > 0]
+            print()
+            if exp_turn > 0:
+                print(f"  RATIO per turn : {base_cls} / {exp_cls} = {base_turn / exp_turn:.3f}x")
+            if exp_game > 0:
+                print(f"  RATIO per game : {base_cls} / {exp_cls} = {base_game / exp_game:.3f}x")
+            if paired:
+                print(f"  RATIO per game, computed per game then averaged: {mean(paired):.3f}x "
+                      f"(sd {stdev(paired):.3f}, range {min(paired):.3f} .. {max(paired):.3f}, "
+                      f"n={len(paired)})")
+
+            alpha0 = env.get("SOT_ALPHA0")
+            if alpha0 is None or float(alpha0) > 0.0:
                 print()
-                print(f"  {base_cls} evaluates {ratio:.3f}x as many positions per turn as {exp_cls}.")
+                print(f"  *** WARNING: SOT_ALPHA0={alpha0 if alpha0 else '<unset, defaults to 0.7>'}.")
+                print(f"      Above 0, {exp_cls} runs BOTH evaluators inside a single counted")
+                print(f"      evaluation for every turn in the blend window, so its evals/turn is")
+                print(f"      depressed by work the baseline never does. Counting the same EVENT is")
+                print(f"      not the same as counting the same WORK. Calibrate equal effort at")
+                print(f"      SOT_ALPHA0=0, where one counted evaluation is exactly one network")
+                print(f"      forward pass.")
+
+            if exp_turn > 0:
+                print()
                 print(f"  SUGGESTED SOT_TIME_SCALE for equal effort: "
-                      f"{ratio * float(env.get('SOT_TIME_SCALE', 1.0)):.4f}")
+                      f"{(base_turn / exp_turn) * float(env.get('SOT_TIME_SCALE', 1.0)):.4f}")
                 print(f"  (That assumes evaluations per turn is linear in the time budget, which is")
                 print(f"   approximately but not exactly true -- tree reuse and the rule-based fast")
                 print(f"   paths do not scale with the clock. Put the suggestion into")

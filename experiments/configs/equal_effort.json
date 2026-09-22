@@ -1,7 +1,24 @@
 {
   "name": "equal_effort",
   "description": "PLACEHOLDER -- NOT RUNNABLE AS SHIPPED. Isolates evaluation quality from search volume by giving DeepSetsBotExp whatever extra wall clock it needs to evaluate the SAME number of positions per turn as the stock-speed baseline, instead of the same wall clock. The answer to 'is the network better, or is the heuristic agent just searching more?' is this matchup's win rate. Fill in the two TBDs from a calibration run before submitting anything.",
-
+  "_why_alpha0_is_zero": "SOT_ALPHA0=0 on both the matchup and the calibration block, and it is load-bearing, not incidental. The question here is about the NETWORK as an evaluator. At alpha0>0 the blend window runs BOTH evaluators inside a single counted evaluation, so DeepSetsBotExp's evaluations-per-turn is depressed by work the baseline never does -- the counter measures the same event on both sides but not the same work, and the matched time scale comes out inflated. At alpha0=0 the pure-network short circuit in Evaluate() fires on every leaf and one counted evaluation is exactly one ONNX forward pass, which is the quantity that belongs on both sides of an equal-effort comparison.",
+  "_calibration_so_far": [
+    "Local pilot, 2026-09-22, 10 games, SOT_ALPHA0=0, both sides at scale 1.0, --timeout 12.",
+    "NOT a substitute for a cluster run -- different hardware, and n=10 is not enough.",
+    "  DeepSetsBotExp   9459 evals/turn pooled  (106,891 /game, sd 3825 across games)",
+    "  SakkirinaScaled 76699 evals/turn pooled  (905,048 /game, sd 31776 across games)",
+    "  ratio r = 8.11x per turn pooled, 8.47x per game pooled",
+    "  per-game ratio ranged 2.71x .. 21.07x; 95% CI on the mean [5.65, 13.03]",
+    "At SOT_ALPHA0=0.7 the same measurement gave 14.95x -- the blend runs both evaluators",
+    "inside one counted evaluation, which is why this config pins alpha0 to 0.",
+    "COST, read before submitting: r ~ 8 means ~78s of thinking per turn, an engine --timeout",
+    "near 90, roughly 18 minutes per game and about 120 core-hours for the 400 games. Submit",
+    "with an explicit --time=00:45:00; slurm_experiment.sh's 00:30:00 default would kill every",
+    "task. See experiments/configs/equal_effort_baseline_slowed.json for the same question asked",
+    "from the other direction at a normal row's cost -- run that one first, and read the two",
+    "together. This calibration serves both configs.",
+    "The CI is wide enough that r should be re-derived from >=20 cluster games."
+  ],
   "_how_to_fill_this_in": [
     "1. tools/benchmark_cluster.sh --config equal_effort --out-dir $OUT_DIR --calibrate",
     "   Runs the calibration block below (20 games, DeepSetsBotExp vs SakkirinaScaled, both at",
@@ -19,12 +36,12 @@
     "quietly fell back to SOT_TIME_SCALE=1.0 would produce a full set of numbers labelled",
     "'equal effort' that measured nothing of the kind."
   ],
-
   "seed_base": 20260924,
   "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
-  "allowed_onnx_sha256": ["86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"],
+  "allowed_onnx_sha256": [
+    "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
+  ],
   "bot_log": "parse",
-
   "defaults": {
     "games": 400,
     "timeout": 12,
@@ -37,13 +54,13 @@
       "bot_b": "SakkirinaScaled",
       "timeout": "TBD",
       "env": {
+        "SOT_ALPHA0": "0.0",
         "SOT_TIME_SCALE": "TBD",
         "SOT_BASELINE_TIME_SCALE": "1.0"
       },
-      "note": "The baseline stays at 1.0 (stock SakkirinaSolo timing) on purpose -- it is the fixed point the treatment is matched TO. Only DeepSetsBotExp's clock moves."
+      "note": "The baseline stays at 1.0 (stock SakkirinaSolo timing) on purpose -- it is the fixed point the treatment is matched TO. Only DeepSetsBotExp's clock moves. SOT_ALPHA0=0 makes this the pure-network agent (behaviourally DeepSetsBot); see _why_alpha0_is_zero above."
     }
   ],
-
   "calibration": {
     "games": 20,
     "matchups": [
@@ -52,8 +69,12 @@
         "bot_a": "DeepSetsBotExp",
         "bot_b": "SakkirinaScaled",
         "timeout": 12,
-        "env": {"SOT_TIME_SCALE": "1.0", "SOT_BASELINE_TIME_SCALE": "1.0"},
-        "note": "SakkirinaScaled rather than SakkirinaSolo because stock SakkirinaSolo emits no throughput telemetry at all, and at SOT_BASELINE_TIME_SCALE=1.0 the two are timing-identical. This is how the stock baseline's evaluations per turn gets measured."
+        "env": {
+          "SOT_ALPHA0": "0.0",
+          "SOT_TIME_SCALE": "1.0",
+          "SOT_BASELINE_TIME_SCALE": "1.0"
+        },
+        "note": "SakkirinaScaled rather than SakkirinaSolo because stock SakkirinaSolo emits no throughput telemetry at all, and at SOT_BASELINE_TIME_SCALE=1.0 the two are timing-identical. This is how the stock baseline's evaluations per turn gets measured. SOT_ALPHA0=0 must match the matchup it is calibrating FOR -- calibrating at 0.7 and running at 0.0 would match the wrong agent's throughput."
       }
     ]
   }

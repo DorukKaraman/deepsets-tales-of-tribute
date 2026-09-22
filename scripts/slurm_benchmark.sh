@@ -26,7 +26,7 @@
 # CLUSTER DETAILS (RWTH CLAIX, filled in already -- nothing to edit here
 # unless your setup differs):
 #   partition c23ms, 1 core/task, ~2GB/core, no --account needed, .NET via
-#   `source $HOME/tot/env.sh`, repo at $HOME/tot/ScriptsOfTribute-Core.
+#   `source $HOME/tot/env.sh`, repo at $HOME/tot/deepsets-tales-of-tribute.
 #
 # ARRAY SIZE / CHUNKING: 4000 tasks may exceed this cluster's configured
 # MaxArraySize (check with `scontrol show config | grep -i MaxArraySize` on
@@ -54,16 +54,21 @@
 # always safe -- only genuinely missing/failed tasks do any work.
 #
 # SETUP (do this BEFORE sbatch-ing, not after):
-#   1. source $HOME/tot/env.sh
-#      cd $HOME/tot/ScriptsOfTribute-Core
-#      git pull
+#   1. Clone FRESH, into a NEW directory -- $HOME/tot/ScriptsOfTribute-Core is
+#      a different, older repository and does not contain this script's
+#      current harness.
+#      source $HOME/tot/env.sh
+#        git clone -b experiments \
+#            https://github.com/DorukKaraman/deepsets-tales-of-tribute.git \
+#            $HOME/tot/deepsets-tales-of-tribute
+#      cd $HOME/tot/deepsets-tales-of-tribute
 #      dotnet build Bots/Bots.csproj -c Release
 #      dotnet build GameRunner/GameRunner.csproj -c Release
 #   2. Create the logs directory yourself -- SLURM does NOT create the
 #      directory for #SBATCH --output/--error; if it doesn't already exist
 #      when this is submitted, every task fails immediately before the
 #      script body even runs:
-#        mkdir -p $HOME/tot/ScriptsOfTribute-Core/logs
+#        mkdir -p $HOME/tot/deepsets-tales-of-tribute/logs
 #   3. Verify the onnx sha256 by hand once (tools/benchmark_cluster.sh
 #      re-verifies it on every single task anyway, but see it fail loudly
 #      here first rather than 4000 times in an array log). All four
@@ -94,14 +99,14 @@
 # on purpose: #SBATCH directives are parsed by sbatch itself and do not
 # reliably expand shell variables like $HOME, so an absolute path would need
 # a literal, pre-resolved home directory hardcoded here instead. This is why
-# the SETUP steps above have you `cd $HOME/tot/ScriptsOfTribute-Core` before
+# the SETUP steps above have you `cd $HOME/tot/deepsets-tales-of-tribute` before
 # sbatch-ing -- submit from anywhere else and the logs/ directory (and its
 # mkdir -p in SETUP step 2) needs to be wherever you actually ran sbatch from.
 
 set -euo pipefail
 
 # --- Edit if your setup differs from the CLUSTER DETAILS above ---
-REPO_ROOT="$HOME/tot/ScriptsOfTribute-Core"
+REPO_ROOT="$HOME/tot/deepsets-tales-of-tribute"
 OUT_DIR="$HOME/tot/benchmark_results"    # small JSON files, not bulk data --
                                           # $HOME is fine here, unlike the
                                           # /hpcwork/... paths the data-gen

@@ -8,7 +8,8 @@ the original hardcoded benchmark did.
 |---|---|---|---|
 | [`alpha_sweep.json`](alpha_sweep.json) | How much of the advantage is the blend, and how much is the network alone? | 5 × 400 | 2000 |
 | [`time_scaling.json`](time_scaling.json) | Does the advantage grow, shrink or hold as the per-turn budget moves from 2 s to 30 s? | 5 × 400 | 2000 |
-| [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? | 1 × 400 | 400 |
+| [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up. | 1 × 400 | 400 |
+| [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheap; run it first. | 1 × 400 | 400 |
 | [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly. | 10 × 400 | 4000 |
 
 `legacy_paper_benchmark.json` is the previously-hardcoded list: same order, same
@@ -53,8 +54,8 @@ board. Every `SOT_*` variable the harness manages is stripped from the ambient
 environment first, so an exported `SOT_ALPHA0` in the submitting shell cannot
 leak into a run that never asked for it.
 
-**`"TBD"` is a refusal, not a default.** `equal_effort.json` ships with
-placeholders it cannot know until a calibration run has happened. Any task in a
+**`"TBD"` is a refusal, not a default.** Both `equal_effort*.json` configs ship
+with placeholders they cannot know until a calibration run has happened. Any task in a
 matchup that still carries one refuses to run. It would otherwise fall back to
 the bot's default and produce 400 games labelled as an experiment that was
 never performed — which, afterwards, is indistinguishable from a real result.
@@ -87,6 +88,26 @@ python tools/aggregate_benchmark_results.py --config alpha_sweep --out-dir "$OUT
 Resubmitting is always safe: a task whose result file exists is skipped without
 running anything.
 
+## Equal effort, in both directions
+
+The two `equal_effort*` configs target the same matched ratio and move opposite
+sides to reach it. Both are run, because neither is decisive alone:
+
+| | moves | keeps fixed | distortion | cost |
+|---|---|---|---|---|
+| `equal_effort` | `SOT_TIME_SCALE = r` | baseline at stock timing | the treatment gets a budget (~78 s/turn) no tournament would give it | ~120 core-hours / 400 games |
+| `equal_effort_baseline_slowed` | `SOT_BASELINE_TIME_SCALE = 1/r` | treatment at stock timing | the baseline runs at ~1/8 of the budget it was tuned for, and a hand-tuned heuristic may degrade non-linearly | a normal row |
+
+What carries weight is **agreement between them**. Same direction in both means
+the conclusion survives whichever side was moved. Disagreement is itself the
+finding: evaluations per turn would not be the right currency for "effort" in
+this matchup, and the framing would need rethinking before either number is
+reported.
+
+**One calibration serves both.** It measures *r*; the configs apply it to
+opposite sides. The harness prints *r* as the suggestion, so take its
+**reciprocal** for the baseline-slowed config.
+
 ## Calibration
 
 ```bash
@@ -96,6 +117,11 @@ tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR" --calibrat
 Runs the config's `calibration` matchups sequentially (20 games by default) and
 reports mean **evaluations per turn** per agent, plus a suggested
 `SOT_TIME_SCALE` for equal effort.
+
+Calibrate at `SOT_ALPHA0=0`, which both equal-effort configs pin. Above 0, one
+counted evaluation runs *both* evaluators inside the blend window, so the
+counter measures the same event on each side but not the same work — measured at
+14.95× per turn at `alpha0=0.7` against 8.11× at `alpha0=0`.
 
 Per *turn*, not per second or per game: evals/sec is swamped by opponent
 thinking time and evals/game by game length, and both of those move when the

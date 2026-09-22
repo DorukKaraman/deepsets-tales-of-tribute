@@ -111,6 +111,69 @@ budget scaled by 0.45 and nothing else changed. It reproduces the throughput
 deficit without also swapping the evaluator, which isolates search volume from
 evaluation quality.
 
+> **⚠ The 102,700 / 226,100 figures did not reproduce, and `HALF_STRENGTH_FACTOR
+> = 0.45` is derived from them.** 0.45 is exactly 102,734 / 226,057. Re-measured
+> on 2026-09-22 with the counters verified equivalent (see
+> [Counting evaluations](#counting-evaluations) below):
+>
+> | | historical | re-measured | |
+> |---|---|---|---|
+> | `DeepSetsBot` (frozen), evals/game | 102,734 | 112,725 | **1.10x** |
+> | stock-timing baseline, evals/game | 226,057 | 635,910 | **2.81x** |
+> | ratio | 2.20x | 5.64x | |
+>
+> Pooled over 6 games, `DeepSetsBot` vs `SakkirinaScaled` at
+> `SOT_BASELINE_TIME_SCALE=1.0`, `--timeout 10`. **The neural side reproduces;
+> the heuristic baseline does not.** The cause is not identified — the repository
+> is a single squashed commit, so the measurement conditions behind the
+> historical figures (hardware, ONNX Runtime version, engine `--timeout`) cannot
+> be recovered, and the agent they were taken from (`SakkirinaNeural`) is no
+> longer in the tree.
+>
+> If the deficit is really ~1/5.6 rather than ~1/2.2, then 0.45 does not
+> reproduce it and `SakkirinaHalf` is calibrated to the wrong point (~0.18 would
+> be the equivalent). **Re-measure on the cluster before reporting anything that
+> depends on 0.45.** The patch is deliberately left untouched pending that
+> measurement, so the control keeps producing the same agent it always did.
+>
+> Per-game variance is large — the ratio ranged 3.28x to 19.64x across those 6
+> games — so use a pooled figure over ≥20 games, not a mean of per-game ratios.
+
+## Counting evaluations
+
+`DeepSetsBotExp` and `SakkirinaScaled` both report evaluations per turn, and
+equal-effort matching depends on the two counters meaning the same thing. They
+do, verified structurally rather than assumed:
+
+| | `experiments/bots/DeepSetsBotExp.cs` | `Bots/src/SakkirinaScaled.cs` |
+|---|---|---|
+| counter increment | line 565 | line 333 |
+| position in `Evaluate()` | **first statement**, before any branch or early return | **first statement**, before any branch or early return |
+| `Evaluate()` definition | line 563 | line 331 |
+| call sites of `Evaluate()` | exactly one: line 992 | exactly one: line 848 |
+| that call site | `return Evaluate(gameState, myPlayerID);`, the last statement of `Simulate()` | identical |
+| `Simulate` / `MoveSimulate` / `TreeSearch` | identical to SakkirinaScaled's modulo one trailing comment | — |
+
+The frozen `DeepSetsBot` (line 379) and `DeepSetsBlendBot` increment in the same
+place, so current numbers are comparable with anything those agents logged.
+
+**One counted evaluation is not always the same amount of work.** At
+`SOT_ALPHA0 > 0`, `Evaluate()` runs *both* the heuristic and the network inside
+a single increment for every leaf in the blend window, while the baseline's
+increment is always one heuristic pass. Calibrating there charges the DeepSets
+side for work the baseline never does and inflates the matched time scale —
+measured at **14.95x per turn at alpha0=0.7 against 8.11x at alpha0=0**, i.e.
+the blend alone accounted for a factor of 1.8. `equal_effort.json` therefore
+pins `SOT_ALPHA0=0` in both its matchup and its calibration block, where one
+increment is exactly one ONNX forward pass.
+
+**The neural agent is not ONNX-bound.** The frozen `DeepSetsBot`'s own
+telemetry puts only **13–31 %** of wall clock inside
+`EvaluateBoardState` (`fractionOfWallClockInEvaluateBoardState`, 3 games). Most
+of the per-evaluation cost is feature extraction and tensor marshalling around
+the inference call, not the inference itself — which is worth knowing before
+anyone tries to close the throughput gap by optimising the model.
+
 ## The dead-code equivalence null result
 
 `bots/DeepSetsBotTrim.cs`, `bots/DeepSetsBlendBotTrim.cs`

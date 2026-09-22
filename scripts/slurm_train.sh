@@ -68,7 +68,7 @@
 set -euo pipefail
 
 # --- Fill in before submitting ---
-REPO_ROOT="CHANGE_ME_REPO_ROOT"        # e.g. /home/you/tot/ScriptsOfTribute-Core
+REPO_ROOT="CHANGE_ME_REPO_ROOT"        # e.g. /home/you/tot/deepsets-tales-of-tribute
 DATA_DIR="CHANGE_ME_SPLIT_DATA_DIR"    # tools/split_dataset.py output: contains train/ and val/
 
 # --- Have real defaults; edit if you want different ones ---

@@ -13,7 +13,7 @@
 #
 # CLUSTER DETAILS (RWTH CLAIX): partition c23ms, 1 core/task, ~2GB/core, no
 # --account needed, .NET via `source $HOME/tot/env.sh`, repo at
-# $HOME/tot/ScriptsOfTribute-Core. Edit below if yours differs.
+# $HOME/tot/deepsets-tales-of-tribute. Edit below if yours differs.
 #
 # ---------------------------------------------------------------------------
 # CHOOSING THE EXPERIMENT
@@ -54,13 +54,19 @@
 # whole array) is always safe -- only genuinely missing/failed tasks do work.
 #
 # SETUP (do this BEFORE sbatch-ing, not after):
-#   1. source $HOME/tot/env.sh
-#      cd $HOME/tot/ScriptsOfTribute-Core
-#      git pull
-#      ./scripts/fetch_baselines.sh          # SakkirinaSolo + SakkirinaScaled
-#      dotnet build Bots/Bots.csproj -c Release
-#      dotnet build GameRunner/GameRunner.csproj -c Release
-#   2. mkdir -p $HOME/tot/ScriptsOfTribute-Core/logs
+#   1. Clone FRESH, into a NEW directory. Do NOT pull into an existing
+#      $HOME/tot/ScriptsOfTribute-Core -- that is a different, older
+#      repository, and none of the experiment configs or agents exist in it.
+#        source $HOME/tot/env.sh
+#        mkdir -p $HOME/tot
+#        git clone -b experiments \
+#            https://github.com/DorukKaraman/deepsets-tales-of-tribute.git \
+#            $HOME/tot/deepsets-tales-of-tribute
+#        cd $HOME/tot/deepsets-tales-of-tribute
+#        ./scripts/fetch_baselines.sh        # SakkirinaSolo + SakkirinaScaled
+#        dotnet build Bots/Bots.csproj -c Release
+#        dotnet build GameRunner/GameRunner.csproj -c Release
+#   2. mkdir -p $HOME/tot/deepsets-tales-of-tribute/logs
 #      SLURM does NOT create the directory for #SBATCH --output/--error; if it
 #      does not exist at submission time, every task fails before this script's
 #      body even runs.
@@ -80,12 +86,12 @@
 # purpose: #SBATCH directives are parsed by sbatch itself and do not reliably
 # expand shell variables like $HOME, so an absolute path would need a literal,
 # pre-resolved home directory hardcoded here. This is why the SETUP steps have
-# you `cd $HOME/tot/ScriptsOfTribute-Core` before sbatch-ing.
+# you `cd $HOME/tot/deepsets-tales-of-tribute` before sbatch-ing.
 
 set -euo pipefail
 
 # --- Edit if your setup differs from the CLUSTER DETAILS above ---
-REPO_ROOT="$HOME/tot/ScriptsOfTribute-Core"
+REPO_ROOT="$HOME/tot/deepsets-tales-of-tribute"   # the fresh clone; see SETUP above
 CONFIG="${SOT_EXP_CONFIG:-}"             # set via --export=ALL,SOT_EXP_CONFIG=...
 OUT_DIR_BASE="$HOME/tot/experiment_results"  # small JSON files, not bulk data,
                                               # so $HOME is fine here -- unlike
