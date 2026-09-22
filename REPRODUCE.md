@@ -47,15 +47,29 @@ So, when citing:
 ## Prerequisites
 
 - .NET 8 SDK
-- Python 3.10+ with `torch`, `torch_geometric`, `onnxruntime`, `scikit-learn`,
-  `numpy`, `matplotlib`
+- Python 3.9–3.11 with `torch`, `torch_geometric`, `onnxruntime`,
+  `scikit-learn`, `numpy`, `matplotlib`
 - `git` and `patch` (for `scripts/fetch_baselines.sh`)
 
 ```bash
+./scripts/setup_python_env.sh                # pinned, CPU-only venv
+source .venv/bin/activate
+
 dotnet build TalesOfTribute.sln -c Release
 ./scripts/fetch_baselines.sh                 # needed for anything involving baselines
 dotnet build TalesOfTribute.sln -c Release   # rebuild, now with the baselines
 ```
+
+`scripts/setup_python_env.sh` pins **torch 2.2.2**, which is the version that
+reproduces the shipped ONNX byte hash — see [Reproducing the model file byte for
+byte](#reproducing-the-model-file-byte-for-byte). It installs CPU-only wheels
+from PyTorch's CPU index; the cluster partition these experiments run on has no
+GPUs, and the CUDA builds are several GB that would never be used. Python 3.12+
+is rejected, because torch 2.2.2 publishes no wheels for it.
+
+`fetch_baselines.sh` also derives `SakkirinaScaled` (see
+[the experiments](#7-paper-experiments)) alongside `SakkirinaGen` and
+`SakkirinaHalf`.
 
 ## 0. Regenerate the card database
 
@@ -148,12 +162,49 @@ Runtime: minutes, dominated by I/O.
 python training/train_local.py \
     --train-dir /path/to/split/train \
     --val-dir   /path/to/split/val \
-    --epochs 3 --batch-size 256 --lr 5e-4 \
+    --epochs 3 --batch-size 256 --lr 5e-4 --seed 0 \
     --out-dir /path/to/models
 ```
 
 The shipped model used 3 epochs at batch 256 and lr 5e-4. Writes a per-epoch
-checkpoint, a `best_model.pth`, and `training_metrics.json`.
+checkpoint, a `best_model.pth`, `training_metrics.json`, and a `run_config.json`
+recording the seed and hyperparameters.
+
+`--seed` (default `0`) seeds torch, numpy, python `random` **and the shuffle
+buffer** — `training/stream_dataset.py` shuffles shard order and picks buffer
+eviction slots inside the DataLoader worker processes, where the main process's
+`random.seed()` does not reach, so `worker_init_fn` seeds each worker from
+torch's per-worker seed. This script used to be unseeded, so every rerun
+differed; it is now reproducible by default. Identical seeds give identical
+weight initialisation and identical data order. They do **not** give bit-exact
+loss curves: thread count, BLAS version and hardware all matter and a seed
+controls none of them.
+
+### Several seeds, on the cluster
+
+A single trained model's win rate is one sample from a distribution, and
+reporting it as the distribution is the usual way a result like this fails to
+replicate. `scripts/slurm_train.sh` is an array over seeds that trains, exports
+each to ONNX, and writes everything under a per-seed directory in `$HPCWORK`:
+
+```bash
+./scripts/setup_python_env.sh --venv-dir "$HPCWORK/tot_venv"   # once, on the login node
+# edit the CHANGE_ME_* placeholders in scripts/slurm_train.sh
+mkdir -p logs
+sbatch scripts/slurm_train.sh                                   # --array=0-4 -> seeds 0..4
+```
+
+Each seed leaves `best_model.pth`, the per-epoch checkpoints,
+`training_metrics.json`, `run_config.json`, a seed-tagged `.onnx` and a
+`SHA256SUMS` under `$HPCWORK/tot_models/seed_NN/`. Nothing is written to `/tmp`:
+the script refuses to run if `$HPCWORK` is unset rather than falling back, and
+points `TMPDIR` at `$HPCWORK` too, because compute-node `/tmp` is node-local and
+is wiped when the job ends.
+
+Unlike the benchmark arrays (1 core per task, because one game is
+single-threaded by construction), this asks for 8 cores and pins the thread
+count to the allocation — left unset, OpenMP sizes itself from the machine's
+total core count rather than the cgroup's.
 
 **We do not have the shipped model's training metrics.** The run that produced
 it (8 August 2026) left only the checkpoint and the exported ONNX behind; no
@@ -268,8 +319,16 @@ to trust.
 On a cluster, edit `scripts/slurm_benchmark.sh`, submit, then aggregate:
 
 ```bash
-python tools/aggregate_benchmark_results.py --out-dir /path/to/results
+python tools/aggregate_benchmark_results.py \
+    --config legacy_paper_benchmark --out-dir /path/to/results
 ```
+
+The matchup list, game count and `--timeout` now live in
+[`experiments/configs/legacy_paper_benchmark.json`](experiments/configs/legacy_paper_benchmark.json),
+which reproduces the previously-hardcoded set exactly — same order, same seeds,
+same task ids, same result directory names — so an in-flight run resumes across
+that change. `tools/benchmark_cluster.sh` defaults to it. **The aggregator needs
+the same `--config` the run used.**
 
 Both harnesses run **one game per OS process**. `GameRunner` reuses one bot
 instance across `--runs N` and its stats counter only reports aggregates per
@@ -291,7 +350,112 @@ clock at 32 concurrent tasks. Resumable — a task with no result file is retrie
 **Before trusting any result, confirm the model actually loaded.** Both
 harnesses verify the ONNX hash in `GameRunner`'s output before running a single
 game, because an agent whose model fails to load does not crash; it falls back
-to the heuristic and quietly measures the wrong thing.
+to the heuristic and quietly measures the wrong thing. The pin is now a *list*
+of allowed hashes, since per-seed training produces several legitimate models;
+it is still not skippable.
+
+## 7. Paper experiments
+
+Three experiments, one harness, one build. Each is a JSON config in
+[`experiments/configs/`](experiments/configs/) — see
+[that directory's README](experiments/configs/README.md) for the format, and
+[`experiments/README.md`](experiments/README.md) for the agents they use.
+
+All three run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
+environment hooks and nothing else changed. The submitted agents stay
+byte-identical; `SOT_ALPHA0=0` makes the copy behave as `DeepSetsBot` and the
+default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
+
+| Config | Question | Tasks |
+|---|---|---|
+| `alpha_sweep` | How much of the advantage is the blend versus the network alone? | 2000 |
+| `time_scaling` | Does the advantage hold as the per-turn budget moves 2 s → 30 s? | 2000 |
+| `equal_effort` | Is the network better, or is the baseline just searching more? | 400 |
+
+### Cluster commands, in order
+
+```bash
+# --- once, on the login node ---
+source $HOME/tot/env.sh
+cd $HOME/tot/ScriptsOfTribute-Core
+git pull
+./scripts/fetch_baselines.sh                      # SakkirinaSolo + SakkirinaScaled
+dotnet build Bots/Bots.csproj       -c Release
+dotnet build GameRunner/GameRunner.csproj -c Release
+mkdir -p logs                                     # SLURM will NOT create this for you
+
+export OUT_DIR=$HOME/tot/experiment_results
+
+# --- 1. alpha sweep ---
+tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep" --dry-run
+sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep --array=0-1999%32 scripts/slurm_experiment.sh
+python tools/aggregate_benchmark_results.py --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep"
+
+# --- 2. time scaling ---
+tools/benchmark_cluster.sh --config time_scaling --out-dir "$OUT_DIR/time_scaling" --dry-run
+# 0-1599 is the required 2/5/10/20 s rows; 1600-1999 is the optional 30 s row
+sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=0-1599%32 --time=00:20:00 scripts/slurm_experiment.sh
+sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=1600-1999%32 --time=00:30:00 scripts/slurm_experiment.sh
+python tools/aggregate_benchmark_results.py --config time_scaling --out-dir "$OUT_DIR/time_scaling"
+
+# --- 3. equal effort: CALIBRATE FIRST, the config ships unrunnable ---
+tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR/equal_effort" --calibrate
+#   -> put the suggested SOT_TIME_SCALE into experiments/configs/equal_effort.json,
+#      set that matchup's "timeout" to ceil(9.8 * scale) + 2, then re-run
+#      --calibrate to confirm the two evals/turn figures actually meet.
+sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort --array=0-399%32 scripts/slurm_experiment.sh
+python tools/aggregate_benchmark_results.py --config equal_effort --out-dir "$OUT_DIR/equal_effort"
+```
+
+`--array` may exceed the site's `MaxArraySize`
+(`scontrol show config | grep -i MaxArraySize`); submit in chunks if so. Every
+task is resumable — one whose result file exists is skipped without running
+anything — so resubmitting a chunk, or the whole array, is always safe.
+
+### Disqualifications and timeouts are reported separately
+
+`GameRunner` now prints the exact `GameEndReason` per game, and the aggregator
+splits the non-clean games into **timeout**, **disqualification** and
+**turn limit**, attributed to the side that caused them. At a 2 s budget a game
+lost to a timeout is not a game lost to play, and pooling the two (as the
+engine's own "other factors" counter does) would make a budget that is simply
+too tight look like an agent that is simply worse. `time_scaling.json` sets
+engine `--timeout` to budget + 2 s to keep timeouts near zero; **if they are
+not, raise the margin and re-run the row rather than reporting its win rate.**
+
+## 8. Held-out evaluation
+
+The benchmark measures agents. This measures *models*, on data none of them
+were trained on.
+
+```bash
+# 1. generate a held-out set from two DIFFERENT agents
+tools/generate_data.sh --games 2000 --out-dir "$HPCWORK/heldout" \
+    --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base 20260925
+
+# 2. score every checkpoint on it, in one pass, on identical samples
+python tools/evaluate_checkpoints.py \
+    models/deepsets_value_network.pth \
+    "$HPCWORK"/tot_models/seed_*/best_model.pth \
+    --data-dir "$HPCWORK/heldout"
+```
+
+Neither shipped model was trained on games between `DeepSetsBotExp` and
+`SakkirinaSolo`, so that pairing is genuinely unseen — which a fresh *self-play*
+set from the same generator would not be, however new its games are.
+`tools/generate_data.sh` alternates seats across jobs whenever the two bots
+differ: first-player advantage is real and correlates with the outcome label, so
+a set generated entirely with one agent in seat P1 would hand every metric a
+systematic bias.
+
+`tools/evaluate_checkpoints.py` reports loss, accuracy, AUC and Brier per
+checkpoint, overall and by prestige-clock bucket, each against that slice's
+majority-class baseline — the same buckets `train_local.py` prints during
+training, so the numbers are directly comparable. It streams the dataset once
+and evaluates every checkpoint per batch, which is what guarantees they are all
+scored on byte-identical samples. The forward pass it uses is the *exported*
+one (plain per-node mean rather than `global_mean_pool`), i.e. the path the
+agent actually runs.
 
 ## Known limitations
 
@@ -308,3 +472,20 @@ to the heuristic and quietly measures the wrong thing.
   shuffling, a regenerated dataset gets a **different train/val partition even
   with the same `--seed`**. A model retrained from a fresh dataset should
   therefore land close to the shipped one, not identical to it.
+- **`DeepSetsBotExp` cannot be proven move-identical to `DeepSetsBlendBot`.**
+  The search is wall-clock budgeted, so two runs of the *same* binary on the
+  same seed can diverge. `experiments/verify_exp_bot_parity.py --self-check`
+  measures that noise floor; the comparison is only meaningful against it.
+- **The alpha sweep is not a paired design.** `seed = seed_base + task_id` and
+  task ids are contiguous across matchups, so the five conditions play different
+  games. They are independent 400-game samples; read small differences against
+  the Wilson intervals the aggregator prints.
+- **`time_scaling`'s 10 s row is not directly comparable to the legacy
+  benchmark.** Every row there uses engine `--timeout` = budget + 2 s so that a
+  turn spending its whole allowance is not scored as a timeout; the legacy
+  benchmark used `--timeout 10` with no margin.
+- **Equal effort is calibrated, not derived.** Evaluations per turn is only
+  approximately linear in the time budget — tree reuse and the rule-based fast
+  paths do not scale with the clock — so the matching `SOT_TIME_SCALE` is found
+  by iterating `--calibrate`, and how closely the two agents actually meet
+  should be reported alongside the win rate.

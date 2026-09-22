@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Cluster-scale training-data generation: <bot> vs <bot> (default
-# SakkirinaGenNeural, our current best agent, 68% vs SakkirinaSolo -- see
-# --bot) through GameRunner's --log-training-data, sharded across --jobs OS
-# processes.
+# Cluster-scale training-data generation through GameRunner's
+# --log-training-data, sharded across --jobs OS processes.
+#
+# Self-play by default (--bot, default SakkirinaGenNeural -- our current best
+# agent, 68% vs SakkirinaSolo), which is what the shipped model was trained on.
+# --bot-a/--bot-b generate from two DIFFERENT agents instead, which is how a
+# HELD-OUT evaluation set gets made: neither shipped model was trained on games
+# between DeepSetsBotExp and SakkirinaSolo, so that pairing produces genuinely
+# unseen data in a way a fresh self-play run from the same generator does not.
+# Seats alternate across jobs in that mode -- see tools/generate_data.py.
 #
 # DIRECT BINARY INVOCATION ONLY. At thousands of games, `dotnet run`'s MSBuild
 # up-to-date check on every invocation is unacceptable overhead -- this script
@@ -37,11 +43,14 @@ GAMES=""
 JOBS="$DETECTED_JOBS"
 OUT_DIR=""
 SEED_BASE=""
-BOT="$DEFAULT_BOT"
+BOT=""
+BOT_A=""
+BOT_B=""
 EXPECT_ONNX_SHA256=""
 DRY_RUN=0
 SKIP_BUILD=0
 TASK_ID=""
+SWAP_OFFSET=0
 
 usage() {
   cat <<EOF
@@ -54,10 +63,17 @@ Required:
                         should never land in a generic default location)
 
 Options:
-  --bot <name>          Bot to self-play, both sides (default: $DEFAULT_BOT,
+  --bot <name>          Bot to self-play, BOTH sides (default: $DEFAULT_BOT,
                         our current best agent). SakkirinaGen (the 2025
                         winner's heuristic, no ONNX model needed) is still a
                         valid value if you want that dataset instead.
+                        Mutually exclusive with --bot-a/--bot-b.
+  --bot-a <name>        P1 bot, used WITH --bot-b to generate from two
+  --bot-b <name>        different agents (a held-out evaluation set). Seats
+                        alternate across jobs, and with --task-id across array
+                        tasks, so the set is not biased by first-player
+                        advantage. Example:
+                          --bot-a DeepSetsBotExp --bot-b SakkirinaSolo
   --jobs <n>            Max concurrent OS processes (default: detected CPU count = $DETECTED_JOBS)
   --seed-base <n>       First seed to use (default: derived from current time)
   --expect-onnx-sha256 <hash>
@@ -95,6 +111,8 @@ patron set is ever needed.
 
 Examples:
   $(basename "$0") --games 4 --jobs 2 --out-dir /tmp/sakgen_data --dry-run
+  $(basename "$0") --games 2000 --out-dir /hpcwork/\$USER/heldout \\
+      --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base 20260925
   $(basename "$0") --games 10000 --out-dir /data/sakgen_run1
   $(basename "$0") --games 300 --out-dir /data/sakgen_run1 --seed-base 42 \\
       --task-id "\$SLURM_ARRAY_TASK_ID" --skip-build
@@ -107,6 +125,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --games) GAMES="${2:-}"; shift 2 ;;
     --bot) BOT="${2:-}"; shift 2 ;;
+    --bot-a) BOT_A="${2:-}"; shift 2 ;;
+    --bot-b) BOT_B="${2:-}"; shift 2 ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
     --seed-base) SEED_BASE="${2:-}"; shift 2 ;;
@@ -125,6 +145,18 @@ if [ -z "$GAMES" ] || [ -z "$OUT_DIR" ]; then
   exit 1
 fi
 
+if [ -n "$BOT" ] && { [ -n "$BOT_A" ] || [ -n "$BOT_B" ]; }; then
+  echo "ERROR: --bot sets both sides; use either --bot or --bot-a/--bot-b, not both." >&2
+  exit 1
+fi
+if { [ -n "$BOT_A" ] && [ -z "$BOT_B" ]; } || { [ -z "$BOT_A" ] && [ -n "$BOT_B" ]; }; then
+  echo "ERROR: --bot-a and --bot-b must be given together." >&2
+  exit 1
+fi
+if [ -z "$BOT_A" ] && [ -z "$BOT" ]; then
+  BOT="$DEFAULT_BOT"
+fi
+
 if [ -n "$TASK_ID" ]; then
   if [ -z "$SEED_BASE" ]; then
     echo "ERROR: --task-id requires --seed-base to be given explicitly -- the" >&2
@@ -136,6 +168,10 @@ if [ -n "$TASK_ID" ]; then
   OUT_DIR="$OUT_DIR/task_$(printf '%02d' "$TASK_ID")"
   SEED_BASE=$((SEED_BASE + TASK_ID * 1000000))
   JOBS=1
+  # Every array task runs a single job numbered 0, so without this every task
+  # would put the same bot in seat P1 and the seat alternation in
+  # tools/generate_data.py would never actually happen. Ignored for self-play.
+  SWAP_OFFSET="$TASK_ID"
   echo "=== SLURM array task ==="
   echo "Task ID        : $TASK_ID"
   echo "Resolved seed  : $SEED_BASE"
@@ -150,8 +186,13 @@ if [ -z "$PYTHON_BIN" ]; then
   exit 1
 fi
 
-RUNNER_ARGS=(--binary "$BINARY" --bot "$BOT" --games "$GAMES" --jobs "$JOBS" --out-dir "$OUT_DIR" \
-             --configuration "$CONFIGURATION")
+RUNNER_ARGS=(--binary "$BINARY" --games "$GAMES" --jobs "$JOBS" --out-dir "$OUT_DIR" \
+             --configuration "$CONFIGURATION" --swap-offset "$SWAP_OFFSET")
+if [ -n "$BOT_A" ]; then
+  RUNNER_ARGS+=(--bot-a "$BOT_A" --bot-b "$BOT_B")
+else
+  RUNNER_ARGS+=(--bot "$BOT")
+fi
 if [ -n "$SEED_BASE" ]; then
   RUNNER_ARGS+=(--seed-base "$SEED_BASE")
 fi

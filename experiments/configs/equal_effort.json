@@ -1,0 +1,60 @@
+{
+  "name": "equal_effort",
+  "description": "PLACEHOLDER -- NOT RUNNABLE AS SHIPPED. Isolates evaluation quality from search volume by giving DeepSetsBotExp whatever extra wall clock it needs to evaluate the SAME number of positions per turn as the stock-speed baseline, instead of the same wall clock. The answer to 'is the network better, or is the heuristic agent just searching more?' is this matchup's win rate. Fill in the two TBDs from a calibration run before submitting anything.",
+
+  "_how_to_fill_this_in": [
+    "1. tools/benchmark_cluster.sh --config equal_effort --out-dir $OUT_DIR --calibrate",
+    "   Runs the calibration block below (20 games, DeepSetsBotExp vs SakkirinaScaled, both at",
+    "   stock speed) and prints mean evaluations per turn for each agent plus a SUGGESTED",
+    "   SOT_TIME_SCALE.",
+    "2. Put that number into matchups[0].env.SOT_TIME_SCALE below, and set matchups[0].timeout to",
+    "   ceil(9.8 * that scale) + 2 -- the engine clock has to be able to accommodate the bot's own",
+    "   enlarged per-turn cap, or every turn ends as a TURN_TIMEOUT.",
+    "3. Re-run --calibrate with those values to CONFIRM the two evals/turn figures actually meet.",
+    "   Evaluations per turn is only approximately linear in the time budget (tree reuse and the",
+    "   rule-based fast paths do not scale with the clock), so the first suggestion is a starting",
+    "   point, not an answer. Iterate until the two agents are within a few percent.",
+    "4. Only then submit the 400-game array.",
+    "The harness REFUSES to run any matchup whose timeout or env still says TBD -- a run that",
+    "quietly fell back to SOT_TIME_SCALE=1.0 would produce a full set of numbers labelled",
+    "'equal effort' that measured nothing of the kind."
+  ],
+
+  "seed_base": 20260924,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": ["86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"],
+  "bot_log": "parse",
+
+  "defaults": {
+    "games": 400,
+    "timeout": 12,
+    "env": {}
+  },
+  "matchups": [
+    {
+      "label": "equal_effort",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": "TBD",
+      "env": {
+        "SOT_TIME_SCALE": "TBD",
+        "SOT_BASELINE_TIME_SCALE": "1.0"
+      },
+      "note": "The baseline stays at 1.0 (stock SakkirinaSolo timing) on purpose -- it is the fixed point the treatment is matched TO. Only DeepSetsBotExp's clock moves."
+    }
+  ],
+
+  "calibration": {
+    "games": 20,
+    "matchups": [
+      {
+        "label": "calibrate_stock_speed",
+        "bot_a": "DeepSetsBotExp",
+        "bot_b": "SakkirinaScaled",
+        "timeout": 12,
+        "env": {"SOT_TIME_SCALE": "1.0", "SOT_BASELINE_TIME_SCALE": "1.0"},
+        "note": "SakkirinaScaled rather than SakkirinaSolo because stock SakkirinaSolo emits no throughput telemetry at all, and at SOT_BASELINE_TIME_SCALE=1.0 the two are timing-identical. This is how the stock baseline's evaluations per turn gets measured."
+      }
+    ]
+  }
+}

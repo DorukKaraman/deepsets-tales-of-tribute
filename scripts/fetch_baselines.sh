@@ -121,8 +121,9 @@ apply_patch() {
   patch --quiet -o "$DEST/$out" "$DEST/SakkirinaSolo.cs" < "$SCRIPTS/$patchfile"
   echo "  derived $out"
 }
-apply_patch SakkirinaGen.cs  sakkirina_gen.patch
-apply_patch SakkirinaHalf.cs sakkirina_half.patch
+apply_patch SakkirinaGen.cs    sakkirina_gen.patch
+apply_patch SakkirinaHalf.cs   sakkirina_half.patch
+apply_patch SakkirinaScaled.cs sakkirina_scaled.patch
 
 cat <<'EOF'
 
@@ -132,8 +133,10 @@ Done. Bots/src/ now contains the baseline agents and the two derived agents.
     SakkirinaSolo.cs, BestMCTS3.cs and BestMCTS3's six support files
 
   Derived from SakkirinaSolo.cs by the patches in scripts/:
-    SakkirinaGen.cs   self-play data generation
-    SakkirinaHalf.cs  search-volume control condition
+    SakkirinaGen.cs     self-play data generation
+    SakkirinaHalf.cs    search-volume control condition
+    SakkirinaScaled.cs  time-budget-scalable baseline (SOT_BASELINE_TIME_SCALE),
+                        with an evaluations-per-turn counter
 
 Next:
     dotnet build TalesOfTribute.sln -c Release

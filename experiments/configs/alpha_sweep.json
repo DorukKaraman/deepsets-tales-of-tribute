@@ -1,0 +1,48 @@
+{
+  "name": "alpha_sweep",
+  "description": "How much of DeepSetsBlendBot's advantage comes from the blend, and how much from the network alone. DeepSetsBotExp vs SakkirinaSolo at five values of the initial blend coefficient alpha0, 400 games each, everything else held fixed. alpha0=0.0 is pure network, which is exactly DeepSetsBot; alpha0=0.7 is exactly DeepSetsBlendBot. The two submitted agents are therefore endpoints of this sweep, not separate conditions.",
+  "seed_base": 20260922,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": ["86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"],
+  "bot_log": "parse",
+  "defaults": {
+    "games": 400,
+    "timeout": 10,
+    "env": {}
+  },
+  "matchups": [
+    {
+      "label": "alpha0_0.0",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_ALPHA0": "0.0"},
+      "note": "Pure network on every leaf, every turn. Behaviourally DeepSetsBot."
+    },
+    {
+      "label": "alpha0_0.3",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_ALPHA0": "0.3"}
+    },
+    {
+      "label": "alpha0_0.5",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_ALPHA0": "0.5"}
+    },
+    {
+      "label": "alpha0_0.7",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_ALPHA0": "0.7"},
+      "note": "DeepSetsBlendBot's own value -- the 1st-place submission. Its win rate here is the sanity check for the whole sweep: it should land near the legacy_paper_benchmark figure for DeepSetsBlendBot vs SakkirinaSolo."
+    },
+    {
+      "label": "alpha0_0.9",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_ALPHA0": "0.9"},
+      "note": "Past the submitted value. Both evaluators run on every leaf for as long as the blend window lasts, so expect lower throughput here than at 0.0 -- see the evals/turn column in the aggregate."
+    }
+  ]
+}

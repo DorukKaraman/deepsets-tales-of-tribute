@@ -8,6 +8,87 @@ The `.cs` files in `bots/` are compiled into `Bots.dll` by an explicit
 `<Compile Include>` in `Bots/Bots.csproj`, so `GameRunner` can load them by
 name like any other bot.
 
+The submitted agents — `Bots/src/DeepSetsBot.cs`,
+`Bots/src/DeepSetsBlendBot.cs`, `Bots/src/DeepSetsCore.cs` — are frozen
+byte-identical to what played the tournament. That is the constraint everything
+here is shaped around: nothing in this directory modifies them, and every
+experimental knob is an environment variable read by a *copy*, so one build
+serves every configuration.
+
+---
+
+## The experiment agent
+
+`bots/DeepSetsBotExp.cs`
+
+A verbatim copy of `DeepSetsBlendBot` with three environment hooks and nothing
+else changed. With none of them set it is the submission.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SOT_ALPHA0` | `0.7` | Initial blend coefficient. `0.0` makes `Evaluate()` take its pure-network short circuit on every leaf — i.e. **`alpha0 = 0` *is* `DeepSetsBot`**, so one class covers both submitted agents. |
+| `SOT_TIME_SCALE` | `1.0` | Multiplies **both** time constants: the 9.8 s `TurnTimeout` and the 0.65 s per-move cap. |
+| `SOT_MODEL_PATH` | unset | ONNX model to load; falls back to the normal resolution. |
+
+**Scale both time constants, never one.** `scripts/sakkirina_half.patch`
+measured what happens otherwise: scaling only the 0.65 s per-call cap and
+leaving `TurnTimeout` at 9.8 s produced ~73 % of stock's eval rate where ~45 %
+was intended, because cheaper calls simply meant more of them fit under the
+same unscaled per-turn ceiling.
+
+A set-but-unparseable or out-of-range value is **rejected and logged**, not
+silently replaced by the default. Values are parsed with `InvariantCulture`, so
+`0.5` means the same thing on a German-locale login node.
+
+It also logs evaluations per turn, which is what makes equal-effort matching
+measurable — see [`configs/equal_effort.json`](configs/equal_effort.json) and
+`tools/benchmark_cluster.py --calibrate`.
+
+### Is it really the same agent?
+
+```bash
+python experiments/verify_exp_bot_parity.py              # Exp vs DeepSetsBlendBot
+python experiments/verify_exp_bot_parity.py --self-check # the timing-noise baseline
+```
+
+Both agents play the same seed against the same opponent and their move
+sequences are compared. **Read the divergence index comparatively, not
+absolutely.** The search is wall-clock budgeted (`while (s.Elapsed <
+timeForMoveComputation)`), so how many iterations fit in 0.65 s depends on
+machine load, JIT warm-up and GC — two runs of the *same binary* on the same
+seed can pick different moves and then drift apart permanently. `--self-check`
+runs `DeepSetsBlendBot` against itself and shows what that noise alone
+produces. A divergence no earlier than the self-check baseline is consistent
+with the two agents being identical; a reproducible divergence at move 0 or 1
+is a real signal.
+
+## The scaled baseline
+
+`SakkirinaScaled` — not a file here; it ships as
+[`scripts/sakkirina_scaled.patch`](../scripts/sakkirina_scaled.patch) and is
+produced by `scripts/fetch_baselines.sh`, for the same reason `SakkirinaHalf`
+does: it is ~97 % verbatim SakkirinaSolo and redistributing it as source would
+be republishing someone else's competition entry.
+
+`SakkirinaSolo` with its two time constants multiplied by
+`SOT_BASELINE_TIME_SCALE` (default `1.0`, which is timing-identical to stock),
+plus an evaluations-per-turn counter. Two things need it:
+
+- **Time scaling** needs a baseline whose budget moves *with* the treatment's.
+  Holding it at 9.8 s while the treatment varies would measure the gap between
+  two budgets, not the effect of the budget.
+- **Equal effort** needs the stock baseline's evaluations per turn, and stock
+  `SakkirinaSolo` emits no throughput telemetry at all. At scale `1.0` this
+  agent is stock, and it counts.
+
+## The experiment configs
+
+[`configs/`](configs/) — see [`configs/README.md`](configs/README.md) for the
+format and the exact cluster commands. In short: the benchmark harness takes a
+JSON file listing matchups, each with its own engine `--timeout`, game count
+and environment dict, so one build and one harness cover the alpha sweep, the
+time-scaling study and the equal-effort control.
+
 ---
 
 ## The search-volume control
@@ -40,10 +121,10 @@ Variants of the two agents with genuinely dead code removed: an unused field
 `Compare` override — 41 lines across each file, none of them reachable.
 
 **The result is a null result, and that is the point.** They were benchmarked
-head-to-head against their un-trimmed originals (see `MATCHUPS` in
-`tools/benchmark_cluster.py`, which retains both self-play matchups) and
-measured as equivalent. The trimming changes nothing about play; it confirms
-the dead code was in fact dead.
+head-to-head against their un-trimmed originals (see
+[`configs/legacy_paper_benchmark.json`](configs/legacy_paper_benchmark.json),
+which retains both self-play matchups) and measured as equivalent. The trimming
+changes nothing about play; it confirms the dead code was in fact dead.
 
 Do not treat these as improved versions of the agents. The submitted,
 tournament-playing agents are `Bots/src/DeepSetsBot.cs` and

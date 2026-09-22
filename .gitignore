@@ -377,3 +377,4 @@ Bots/src/PatronTierList.cs
 # Derived from the fetched SakkirinaSolo.cs by scripts/*.patch
 Bots/src/SakkirinaGen.cs
 Bots/src/SakkirinaHalf.cs
+Bots/src/SakkirinaScaled.cs

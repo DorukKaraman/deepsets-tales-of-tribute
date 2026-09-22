@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import time
 from collections import defaultdict
 
@@ -21,11 +22,37 @@ PRESTIGE_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, float("inf"))]
 
 
 def worker_init_fn(worker_id):
-    """Workers implmented with AI to speed up training"""
-    import random
+    """Seeds each DataLoader worker from torch's own per-worker seed.
+
+    This is what makes --seed reach the SHUFFLE BUFFER: training/stream_dataset.py
+    shuffles shard order and picks buffer eviction slots with the `random`
+    module, inside the worker process, where the main process's random.seed()
+    does not apply. torch.initial_seed() here is worker-specific and is itself
+    derived from the global torch seed, so seeding from it gives every worker a
+    distinct but reproducible stream."""
     seed = torch.initial_seed() % 2**32
     random.seed(seed)
     np.random.seed(seed)
+
+
+def seed_everything(seed):
+    """Seeds all four sources of randomness this pipeline actually uses:
+    python's `random` (stream_dataset's shard shuffle and shuffle buffer in the
+    num_workers=0 case), numpy, torch (weight init, dropout, and the base seed
+    DataLoader derives each worker's seed from -- see worker_init_fn), and
+    torch's CUDA generators if any.
+
+    NOT bit-exact reproducibility. Identical seeds give identical weight
+    initialisation and identical data order, which is what a seed is for here.
+    Exact loss curves additionally depend on thread count, BLAS version and
+    hardware, none of which a seed controls -- see scripts/setup_python_env.sh
+    for the pinned versions, and REPRODUCE.md for what does and does not
+    reproduce."""
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def pick_device():
@@ -107,9 +134,14 @@ def run_validation(model, val_loader, criterion, device):
     return e_val_loss, e_val_acc, all_probs, all_targets, all_prestige_clocks
 
 
-def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir):
+def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir, seed):
     print("Starting training run")
     os.makedirs(out_dir, exist_ok=True)
+
+    # Before the model is constructed: weight initialisation is the first thing
+    # that consumes the torch RNG.
+    seed_everything(seed)
+    print(f"Seed: {seed}")
 
     device = pick_device()
     print(f"Using device: {device}")
@@ -194,6 +226,12 @@ def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir
         with open(os.path.join(out_dir, "training_metrics.json"), "w") as f:
             json.dump(history, f)
 
+    with open(os.path.join(out_dir, "run_config.json"), "w") as f:
+        json.dump({"seed": seed, "epochs": epochs, "batch_size": batch_size, "lr": lr,
+                   "num_workers": num_workers, "train_dir": os.path.abspath(train_dir),
+                   "val_dir": os.path.abspath(val_dir), "torch_version": torch.__version__,
+                   "best_val_loss": best_val_loss}, f, indent=2)
+
     print(f"\nDone. Best val loss: {best_val_loss:.4f} ({best_model_path})")
     return best_model_path
 
@@ -207,9 +245,15 @@ def main():
     parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--out-dir", default=".", help="Where to write checkpoints and training_metrics.json")
+    parser.add_argument("--seed", type=int, default=0,
+                         help="Seeds torch, numpy, python random and the shuffle buffer (default: 0). "
+                              "Previously this script was unseeded, so a rerun differed every time; it "
+                              "now defaults to a fixed seed, and scripts/slurm_train.sh sweeps it to "
+                              "produce independent models from one dataset.")
     args = parser.parse_args()
 
-    train_model(args.train_dir, args.val_dir, args.epochs, args.batch_size, args.lr, args.num_workers, args.out_dir)
+    train_model(args.train_dir, args.val_dir, args.epochs, args.batch_size, args.lr, args.num_workers,
+                args.out_dir, args.seed)
 
 
 if __name__ == "__main__":

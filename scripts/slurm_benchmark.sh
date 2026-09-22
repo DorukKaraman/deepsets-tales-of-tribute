@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # SLURM array template for the cluster-scale DeepSets benchmark: 10 matchups x
-# 400 games = 4000 games, one game per array task. See
-# tools/benchmark_cluster.py for the exact matchup list and task-id layout,
-# and tools/aggregate_benchmark_results.py to summarize results afterward.
+# 400 games = 4000 games, one game per array task. The matchup list, game count
+# and --timeout now live in experiments/configs/legacy_paper_benchmark.json,
+# which reproduces the previously-hardcoded set exactly -- same order, same
+# seeds, same task ids, so an in-flight run resumes across that change. See
+# tools/benchmark_cluster.py for the config format and task-id layout, and
+# tools/aggregate_benchmark_results.py to summarize results afterward (it needs
+# the same --config).
+#
+# For the paper's NEW experiments (alpha sweep, time scaling, equal effort) use
+# scripts/slurm_experiment.sh instead, which takes any config in
+# experiments/configs/. This script stays pinned to the legacy one on purpose:
+# it is the reproduction path for numbers already reported.
 #
 # DESIGN: one array task = one game = one process, NOT one process playing
 # many games. GameRunner reuses a bot instance across --runs N, and its
@@ -116,8 +125,9 @@ echo "Array task $SLURM_ARRAY_TASK_ID of job $SLURM_ARRAY_JOB_ID starting on $(h
 echo "REPO_ROOT=$REPO_ROOT  OUT_DIR=$OUT_DIR  SEED_BASE=$SEED_BASE"
 
 exec "$REPO_ROOT/tools/benchmark_cluster.sh" \
+  --config legacy_paper_benchmark \
   --task-id "$SLURM_ARRAY_TASK_ID" \
   --out-dir "$OUT_DIR" \
   --seed-base "$SEED_BASE" \
-  --expect-onnx-sha256 "$EXPECT_ONNX_SHA256" \
+  --allow-onnx-sha256 "$EXPECT_ONNX_SHA256" \
   --skip-build

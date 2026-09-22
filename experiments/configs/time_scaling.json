@@ -1,0 +1,59 @@
+{
+  "name": "time_scaling",
+  "description": "Does the DeepSets agent's advantage grow, shrink or hold as the per-turn time budget moves? DeepSetsBotExp vs SakkirinaScaled at per-turn budgets of 2, 5, 10, 20 and (optionally) 30 seconds, with the SAME scale applied to BOTH sides at every budget, 400 games each.",
+  "seed_base": 20260923,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": ["86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"],
+  "bot_log": "parse",
+
+  "_budget_note": "Both agents derive their per-turn budget the same way: TurnTimeout = 9.8s * scale and per-move cap = 0.65s * scale. So scale = budget/10 gives a self-imposed cap of 0.98*budget, which is the same 2% margin under the engine clock that the submitted agents use at the stock 10s setting. SOT_TIME_SCALE drives DeepSetsBotExp, SOT_BASELINE_TIME_SCALE drives SakkirinaScaled; they are set to the same number in every row, which is the whole point of the experiment.",
+
+  "_timeout_note": "Engine --timeout is budget + 2s, not budget. The engine clock is a per-TURN budget accumulated across moves, and a turn that legitimately spends its whole allowance would otherwise land right on the boundary and be scored TURN_TIMEOUT -- i.e. the tightest budgets would look like the worst agents, for a reason that has nothing to do with play. The margin is why the aggregator reports timeouts separately: if they are not near zero here, the margin is too small and the row's win rate is not a measurement of anything. NOTE this makes the 10s row NOT directly comparable to legacy_paper_benchmark.json, which used --timeout 10 with no margin.",
+
+  "defaults": {
+    "games": 400,
+    "timeout": 12,
+    "env": {}
+  },
+  "matchups": [
+    {
+      "label": "budget_02s",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 4,
+      "env": {"SOT_TIME_SCALE": "0.2", "SOT_BASELINE_TIME_SCALE": "0.2"},
+      "note": "Bot-side cap 1.96s/turn. The shallowest search in the config -- watch the disqualification column, since a shallower tree makes the no-isomorphic-match fallback fire more often."
+    },
+    {
+      "label": "budget_05s",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 7,
+      "env": {"SOT_TIME_SCALE": "0.5", "SOT_BASELINE_TIME_SCALE": "0.5"}
+    },
+    {
+      "label": "budget_10s",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 12,
+      "env": {"SOT_TIME_SCALE": "1.0", "SOT_BASELINE_TIME_SCALE": "1.0"},
+      "note": "Stock timing on both sides: bot-side cap 9.8s, exactly what the submitted agents and stock SakkirinaSolo use. The reference row."
+    },
+    {
+      "label": "budget_20s",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 22,
+      "env": {"SOT_TIME_SCALE": "2.0", "SOT_BASELINE_TIME_SCALE": "2.0"}
+    },
+    {
+      "label": "budget_30s",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 32,
+      "optional": true,
+      "env": {"SOT_TIME_SCALE": "3.0", "SOT_BASELINE_TIME_SCALE": "3.0"},
+      "note": "OPTIONAL, and the most expensive row by far -- roughly 3x the wall clock of the 10s row for the same 400 games. Skip it by simply not submitting its task-id range (--dry-run prints the range); it is last in the config so leaving it out changes no other row's task ids."
+    }
+  ]
+}
