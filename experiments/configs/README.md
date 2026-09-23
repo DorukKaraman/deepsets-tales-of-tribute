@@ -8,8 +8,8 @@ the original hardcoded benchmark did.
 |---|---|---|---|
 | [`alpha_sweep.json`](alpha_sweep.json) | How much of the advantage is the blend, and how much is the network alone? | 5 × 400 | 2000 |
 | [`time_scaling.json`](time_scaling.json) | Does the advantage grow, shrink or hold as the per-turn budget moves from 2 s to 30 s? | 5 × 400 | 2000 |
-| [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up. | 1 × 400 | 400 |
-| [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheap; run it first. | 1 × 400 | 400 |
+| [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up; landed at 0.88 of the baseline's effort (43,139 vs 49,131 evals/turn). | 1 × 400 | 400 |
+| [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheaper; matched to within 3 % (6,433 vs 6,627 evals/turn). | 1 × 400 | 400 |
 | [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly. | 10 × 400 | 4000 |
 
 `legacy_paper_benchmark.json` is the previously-hardcoded list: same order, same
@@ -54,13 +54,15 @@ board. Every `SOT_*` variable the harness manages is stripped from the ambient
 environment first, so an exported `SOT_ALPHA0` in the submitting shell cannot
 leak into a run that never asked for it.
 
-**`"TBD"` is a refusal, not a default.** Both `equal_effort*.json` configs ship
-with placeholders they cannot know until a calibration run has happened. Any task in a
-matchup that still carries one refuses to run. It would otherwise fall back to
-the bot's default and produce 400 games labelled as an experiment that was
-never performed — which, afterwards, is indistinguishable from a real result.
-`--dry-run` still prints the plan and `--calibrate` still runs, because those
-are how you get the value that fills it in.
+**`"TBD"` is a refusal, not a default.** A config can carry the literal string
+`TBD` for a `timeout` or an `env` value it cannot know until a calibration run
+has happened, and any task in such a matchup refuses to run. It would otherwise
+fall back to the bot's own default and produce 400 games labelled as an
+experiment that was never performed — indistinguishable, afterwards, from a real
+result. `--dry-run` still prints the plan and `--calibrate` still runs, because
+those are how the value gets filled in. Both `equal_effort*.json` configs were
+built this way and are now filled in; nothing currently ships with a
+placeholder.
 
 **The ONNX pin takes a list.** Per-seed training (`scripts/slurm_train.sh`)
 means there is no longer exactly one legitimate model file. `tools/benchmark_cluster.sh`
@@ -90,23 +92,38 @@ running anything.
 
 ## Equal effort, in both directions
 
-The two `equal_effort*` configs target the same matched ratio and move opposite
-sides to reach it. Both are run, because neither is decisive alone:
+The two `equal_effort*` configs target the same ratio and move opposite sides to
+reach it. Both were run, because neither is decisive alone.
 
-| | moves | keeps fixed | distortion | cost |
-|---|---|---|---|---|
-| `equal_effort` | `SOT_TIME_SCALE = r` | baseline at stock timing | the treatment gets a budget (~78 s/turn) no tournament would give it | ~120 core-hours / 400 games |
-| `equal_effort_baseline_slowed` | `SOT_BASELINE_TIME_SCALE = 1/r` | treatment at stock timing | the baseline runs at ~1/8 of the budget it was tuned for, and a hand-tuned heuristic may degrade non-linearly | a normal row |
+One calibration serves both: **n = 60 games gave a ratio of means r = 7.08
+(roughly 6.4–7.8)**. The harness prints *r* as a suggested `SOT_TIME_SCALE`, so
+the baseline-slowed config takes its **reciprocal**.
+
+| | setting | keeps fixed | achieved over 400 games | distortion | cost |
+|---|---|---|---|---|---|
+| `equal_effort_baseline_slowed` | `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/*r*), timeout 12 | treatment at stock timing | **6,433 vs 6,627** evals/turn — within 3 % | baseline runs at ~1/7 of the budget it was tuned for, and a hand-tuned heuristic may degrade non-linearly | a normal row |
+| `equal_effort` | `SOT_TIME_SCALE = 9.0`, timeout 91 | baseline at stock timing | **43,139 vs 49,131** evals/turn — DeepSets at **0.88** of the baseline's effort | the treatment gets an 88.2 s/turn budget no tournament would give it | ~120 core-hours / 400 games |
+
+Figures are `DeepSetsBotExp` vs `SakkirinaScaled`. **Quote the achieved numbers,
+not *r*** — only the baseline-slowed direction is matched, and the sped-up one
+is not: it left DeepSets doing 12 % *less* work than the baseline.
+
+**`SOT_TIME_SCALE = 9.0` is not *r*.** Evaluations per turn is only
+approximately linear in the time budget — tree reuse and the rule-based fast
+paths do not scale with the clock — and a pilot at *r* = 7.08 undershot, so 9.0
+was chosen empirically from that pilot rather than derived.
+
+Both directions ended with DeepSets doing slightly less work than the baseline
+(0.97× and 0.88×), so in both the residual mismatch runs **against** the DeepSets
+agent. That is the conservative direction for the claim: a win under these
+conditions is not explained by the DeepSets side having been handed more search.
 
 What carries weight is **agreement between them**. Same direction in both means
 the conclusion survives whichever side was moved. Disagreement is itself the
 finding: evaluations per turn would not be the right currency for "effort" in
 this matchup, and the framing would need rethinking before either number is
-reported.
-
-**One calibration serves both.** It measures *r*; the configs apply it to
-opposite sides. The harness prints *r* as the suggestion, so take its
-**reciprocal** for the baseline-slowed config.
+reported. Lead with the baseline-slowed direction — it is the cheaper and the
+better-matched of the two — and let the sped-up one confirm it.
 
 ## Calibration
 

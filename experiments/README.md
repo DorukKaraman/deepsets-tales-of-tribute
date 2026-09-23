@@ -167,10 +167,31 @@ network forward pass plus its feature extraction. Measured paired over 6 seeds,
 throughput went **4,501 → 4,574 evaluations per thinking-second** from
 `alpha0=0.0` to `alpha0=0.9`: a 1.6 % change, inside the noise.
 
-`equal_effort.json` still pins `SOT_ALPHA0=0`, for the straightforward reason
-rather than a throughput one: **the experiment is about the network as an
-evaluator, so the agent measured should be the network-only one, and the
-calibration must be run on the same agent that will be benchmarked.**
+Both `equal_effort*.json` configs still pin `SOT_ALPHA0=0`, for the
+straightforward reason rather than a throughput one: **the experiment is about
+the network as an evaluator, so the agent measured should be the network-only
+one, and the calibration must be run on the same agent that will be
+benchmarked.**
+
+### What the equal-effort runs actually achieved
+
+Calibration was n = 60 games, ratio of means *r* = 7.08 (roughly 6.4–7.8). Both
+directions were then run to 400 games. Figures are `DeepSetsBotExp` vs
+`SakkirinaScaled`, evaluations per turn:
+
+| Direction | Setting | Achieved |
+|---|---|---|
+| baseline slowed | `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/*r*), timeout 12 | **6,433 vs 6,627** — within 3 % |
+| treatment sped up | `SOT_TIME_SCALE = 9.0`, timeout 91 | **43,139 vs 49,131** — DeepSets at **0.88** of the baseline's effort |
+
+Only the first is matched. The second is not, and should not be described as
+such: it left DeepSets doing 12 % *less* work than the baseline. `9.0` is not
+*r* — evaluations per turn is only approximately linear in the time budget, a
+pilot at *r* = 7.08 undershot, and 9.0 was chosen empirically from that pilot.
+
+Both directions ended with DeepSets doing slightly less work than the baseline
+(0.97× and 0.88×), so in both the residual mismatch runs **against** the DeepSets
+agent — the conservative direction for the claim.
 
 > **Correction (2026-09-23).** An earlier version of this section claimed the
 > blend inflated the measured ratio by a factor of 1.8, citing 14.95x at

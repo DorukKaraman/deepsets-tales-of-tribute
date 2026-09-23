@@ -429,35 +429,45 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 ### Equal effort is run in both directions
 
 `equal_effort` and `equal_effort_baseline_slowed` target the same ratio —
-evaluations per turn, matched — and move opposite sides to get there. **Both are
-run, because neither is decisive alone.**
+evaluations per turn — and move opposite sides to get there. **Both were run,
+because neither is decisive alone.**
 
-Speeding the treatment up keeps the baseline at exactly the timing its author
-tuned it for, but hands `DeepSetsBotExp` a per-turn budget no tournament would
-give it (~78 s at the pilot ratio), so the agent measured is not the agent
-submitted — and it costs roughly 8× the wall clock of any other row.
+One calibration served both: **n = 60 games, ratio of means *r* = 7.08 (roughly
+6.4–7.8)**. Each config applies it to a different side. Figures below are
+`DeepSetsBotExp` vs `SakkirinaScaled`, evaluations per turn over 400 games:
 
-Slowing the baseline down keeps `DeepSetsBotExp` at exactly its competing
-timing and costs no more than a normal row, but runs SakkirinaSolo's search at
-about an eighth of the budget it was designed around. A hand-tuned heuristic
-agent may degrade non-linearly there: its rule-based fast paths and tree reuse
-do not scale with the clock, so the *shape* of its play changes, not only its
-depth.
+| Direction | Setting | Achieved |
+|---|---|---|
+| baseline slowed | `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/*r*), `--timeout 12` | **6,433 vs 6,627** — within 3 % |
+| treatment sped up | `SOT_TIME_SCALE = 9.0`, `--timeout 91` | **43,139 vs 49,131** — DeepSets at **0.88** of the baseline's effort |
 
-Each direction carries a distortion the other does not, and they are different
-kinds of distortion. What carries weight is **agreement**. If both move the win
-rate the same way, the conclusion is robust to which side was moved. If they
-disagree, that is the finding: evaluations per turn is not the right currency
-for "effort" here, and the framing needs rethinking before either number is
-reported.
+**Quote the achieved figures, not *r*.** Only the baseline-slowed direction is
+matched; the sped-up one is not, and should not be called matched — it left
+DeepSets doing 12 % *less* work than the baseline. Note also that `9.0` is not
+*r*: evaluations per turn is only approximately linear in the time budget, a
+pilot at *r* = 7.08 undershot, and 9.0 was chosen empirically from that pilot.
 
-**Run the baseline-slowed direction first.** It is cheap, and if it already
-answers the question the expensive direction becomes a confirmation rather than
-the primary evidence. One `--calibrate` run serves both: it measures the ratio
-*r*, and the two configs apply it to opposite sides — `equal_effort` sets
-`SOT_TIME_SCALE = r`, `equal_effort_baseline_slowed` sets
-`SOT_BASELINE_TIME_SCALE = 1/r`. The harness prints *r*, so remember to take the
-reciprocal for the second one.
+Both directions ended with DeepSets doing slightly less work than the baseline
+(0.97× and 0.88×), so in both the residual mismatch runs **against** the DeepSets
+agent. That is the conservative direction for the claim: a win under these
+conditions is not explained by the DeepSets side having been handed more search.
+
+The distortions differ in kind. Speeding the treatment up keeps the baseline at
+exactly the timing its author tuned it for, but hands `DeepSetsBotExp` an 88.2 s
+per-turn budget no tournament would give it, so the agent measured is not the
+agent submitted — and it costs roughly 9× the wall clock of any other row.
+Slowing the baseline down keeps `DeepSetsBotExp` at exactly its competing timing
+and costs no more than a normal row, but runs SakkirinaSolo's search at about a
+seventh of the budget it was designed around, where a hand-tuned heuristic may
+degrade non-linearly: its rule-based fast paths and tree reuse do not scale with
+the clock, so the *shape* of its play changes, not only its depth.
+
+What carries weight is **agreement**. If both move the win rate the same way,
+the conclusion is robust to which side was moved. If they disagree, that is the
+finding: evaluations per turn is not the right currency for "effort" here, and
+the framing needs rethinking before either number is reported. **Lead with the
+baseline-slowed direction** — it is both the cheaper and the better-matched of
+the two — and let the sped-up one confirm it.
 
 ### Cluster commands, in order
 
@@ -495,38 +505,33 @@ sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=0-1599%32 --time=00:20:0
 sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=1600-1999%32 --time=00:30:00 scripts/slurm_experiment.sh
 python tools/aggregate_benchmark_results.py --config time_scaling --out-dir "$OUT_DIR/time_scaling"
 
-# --- 3. equal effort: CALIBRATE FIRST, both configs ship unrunnable ---
-# One calibration serves both directions. It prints the ratio r.
+# --- 3. equal effort. Both configs are already calibrated and filled in;
+#        re-calibrate only if the hardware changed, since the ratio depends on it.
 tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
     --out-dir "$OUT_DIR/equal_effort_baseline_slowed" --calibrate
 
-# --- 3a. baseline slowed down. Cheap. Run this one first. ---
-#   -> set SOT_BASELINE_TIME_SCALE = 1/r (the RECIPROCAL of the printed suggestion)
-#      in experiments/configs/equal_effort_baseline_slowed.json. timeout stays 12.
-#      Re-run --calibrate to confirm the two evals/turn figures meet.
+# --- 3a. baseline slowed down. Cheap, and the better-matched direction. ---
+#      SOT_BASELINE_TIME_SCALE=0.141 (= 1/r), timeout 12.
 sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort_baseline_slowed \
     --array=0-399%32 --time=00:15:00 scripts/slurm_experiment.sh
 python tools/aggregate_benchmark_results.py --config equal_effort_baseline_slowed \
     --out-dir "$OUT_DIR/equal_effort_baseline_slowed"
 
-# --- 3b. treatment sped up. Expensive: ~18 min/game, ~120 core-hours for 400. ---
-#   -> put the suggested SOT_TIME_SCALE (r itself) into
-#      experiments/configs/equal_effort.json, set that matchup's "timeout" to
-#      ceil(9.8 * r) + 2, then re-run --calibrate to confirm.
+# --- 3b. treatment sped up. Expensive: ~120 core-hours for 400 games. ---
+#      SOT_TIME_SCALE=9.0, timeout 91 (= ceil(9.8 * 9.0) + 2).
 sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort \
     --array=0-399%32 --time=00:45:00 scripts/slurm_experiment.sh
 python tools/aggregate_benchmark_results.py --config equal_effort --out-dir "$OUT_DIR/equal_effort"
 ```
 
 **`--time` is not optional on 3b.** `slurm_experiment.sh` defaults to
-`00:30:00`, sized for the 30 s rows of `time_scaling`. At the pilot ratio a
-single equal-effort game runs about **18 minutes** — `DeepSetsBotExp` gets a
-~78 s per-turn budget, so a normal-length game takes roughly 8× the usual wall
-clock — and every task would be killed at the 30-minute default with no result
-file. `00:45:00` leaves margin for a long game without over-requesting. Budget
-**~120 core-hours** for the 400 games (400 × 18 min); at `%32` that is about
-4 hours of wall clock. The baseline-slowed direction costs a normal row's
-worth, which is why it is worth running first.
+`00:30:00`, sized for the 30 s rows of `time_scaling`. At `SOT_TIME_SCALE=9.0`
+`DeepSetsBotExp` gets an 88.2 s per-turn budget, so a normal-length game takes
+roughly 9× the usual wall clock and every task would be killed at the 30-minute
+default with no result file. `00:45:00` leaves margin without over-requesting.
+Budget **~120 core-hours** for the 400 games; at `%32` that is about 4 hours of
+wall clock. The baseline-slowed direction costs a normal row's worth, which is
+why it is the one to lead with.
 
 `--array` may exceed the site's `MaxArraySize`
 (`scontrol show config | grep -i MaxArraySize`); submit in chunks if so. Every
