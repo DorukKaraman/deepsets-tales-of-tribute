@@ -1,7 +1,6 @@
 {
   "name": "equal_effort_baseline_slowed",
   "description": "PLACEHOLDER -- NOT RUNNABLE AS SHIPPED. The equal-effort question from the other direction: instead of speeding DeepSetsBotExp up until it evaluates as many positions per turn as the baseline, slow SakkirinaScaled down until it evaluates as few as DeepSetsBotExp. Same question, same target ratio, opposite side moved. Fill in the one TBD from a calibration run before submitting anything.",
-
   "_why_two_directions": [
     "equal_effort.json and this config answer the same question by moving opposite sides, and",
     "BOTH are run because neither is decisive on its own.",
@@ -28,7 +27,6 @@
     "Run this one first. It is cheap, and if it already answers the question the expensive",
     "direction becomes a confirmation rather than the primary evidence."
   ],
-
   "_how_to_fill_this_in": [
     "ONE calibration run serves BOTH equal-effort configs -- it measures the ratio, and the two",
     "configs just apply it to opposite sides. Either config's --calibrate produces it:",
@@ -46,25 +44,28 @@
     "   actually meet, then submit the 400-game array.",
     "The harness REFUSES to run any matchup whose timeout or env still says TBD."
   ],
-
   "_calibration_so_far": [
     "Local pilot, 2026-09-22, 10 games, SOT_ALPHA0=0, both sides at scale 1.0, --timeout 12.",
     "NOT a substitute for a cluster run -- different hardware, and n=10 is not enough.",
-    "  DeepSetsBotExp   9459 evals/turn pooled  (106,891 /game)",
-    "  SakkirinaScaled 76699 evals/turn pooled  (905,048 /game)",
-    "  ratio r = 8.11x per turn pooled  ->  SOT_BASELINE_TIME_SCALE = 1/8.11 = 0.123",
+    "  DeepSetsBotExp   9459 evals/turn pooled  (106,891 /game, sd 3825 across games)",
+    "  SakkirinaScaled 76699 evals/turn pooled  (905,048 /game, sd 31776 across games)",
+    "  ratio r = 8.11x per turn pooled, 8.47x per game pooled",
     "  per-game ratio ranged 2.71x .. 21.07x; 95% CI on the mean [5.65, 13.03]",
-    "The CI is wide enough that the scale should be re-derived from >=20 cluster games before",
-    "either equal-effort config is submitted."
+    "CORRECTION 2026-09-23: an earlier version of this note said a run at SOT_ALPHA0=0.7 gave",
+    "14.95x, and attributed the gap to the blend running both evaluators. That was wrong -- it",
+    "compared an n=2 run against this n=10 one, and the per-game ratio spans 2.71x..21.07x, so",
+    "the difference was sampling noise. A paired measurement over 6 seeds puts the blend's",
+    "throughput cost at ~1.6%. alpha0=0 is still pinned here, for the plain reason: this",
+    "experiment is about the NETWORK as an evaluator, so calibrate on the agent you will run.",
+    "The CI is wide enough that r should be re-derived from >=20 cluster games.",
+    "  -> SOT_BASELINE_TIME_SCALE = 1/r = 1/8.11 = 0.123 for THIS config (the reciprocal)."
   ],
-
   "seed_base": 20260926,
   "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
   "allowed_onnx_sha256": [
     "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
   ],
   "bot_log": "parse",
-
   "defaults": {
     "games": 400,
     "timeout": 12,
@@ -84,7 +85,6 @@
       "note": "DeepSetsBotExp is the fixed point here: SOT_TIME_SCALE=1.0 is exactly the timing it competes at, and SOT_ALPHA0=0 makes it the pure-network agent (behaviourally DeepSetsBot). Only the baseline's clock moves. Expected SOT_BASELINE_TIME_SCALE around 0.12; it must come from a calibration run, not from this note."
     }
   ],
-
   "calibration": {
     "games": 20,
     "matchups": [

@@ -157,15 +157,61 @@ do, verified structurally rather than assumed:
 The frozen `DeepSetsBot` (line 379) and `DeepSetsBlendBot` increment in the same
 place, so current numbers are comparable with anything those agents logged.
 
-**One counted evaluation is not always the same amount of work.** At
-`SOT_ALPHA0 > 0`, `Evaluate()` runs *both* the heuristic and the network inside
-a single increment for every leaf in the blend window, while the baseline's
-increment is always one heuristic pass. Calibrating there charges the DeepSets
-side for work the baseline never does and inflates the matched time scale —
-measured at **14.95x per turn at alpha0=0.7 against 8.11x at alpha0=0**, i.e.
-the blend alone accounted for a factor of 1.8. `equal_effort.json` therefore
-pins `SOT_ALPHA0=0` in both its matchup and its calibration block, where one
-increment is exactly one ONNX forward pass.
+**One counted evaluation is not always the same amount of work**, but the
+difference is small. At `SOT_ALPHA0 > 0`, `Evaluate()` runs *both* the heuristic
+and the network inside a single increment for every leaf in the blend window,
+while the baseline's increment is always one heuristic pass. The blend window is
+not rare — at `alpha0=0.9`, 48 of 76 turns (63 %) had `resolvedAlpha > 0` — but
+the extra pass is nearly free, because the heuristic costs a fraction of a
+network forward pass plus its feature extraction. Measured paired over 6 seeds,
+throughput went **4,501 → 4,574 evaluations per thinking-second** from
+`alpha0=0.0` to `alpha0=0.9`: a 1.6 % change, inside the noise.
+
+`equal_effort.json` still pins `SOT_ALPHA0=0`, for the straightforward reason
+rather than a throughput one: **the experiment is about the network as an
+evaluator, so the agent measured should be the network-only one, and the
+calibration must be run on the same agent that will be benchmarked.**
+
+> **Correction (2026-09-23).** An earlier version of this section claimed the
+> blend inflated the measured ratio by a factor of 1.8, citing 14.95x at
+> `alpha0=0.7` against 8.11x at `alpha0=0`. That was wrong. Those two figures
+> came from different runs — n=2 and n=10 — drawn from a distribution whose
+> per-game ratio spans 2.71x to 21.07x, so the gap between them was sampling
+> noise attributed to a cause. The measurement above isolates `alpha0` properly,
+> paired on identical seeds, and finds a ~1.6 % throughput effect.
+
+## Why evaluations per turn rises with alpha0
+
+The counter increments once per leaf regardless of `alpha0` (see the table
+above), so a rising evals/turn column is not a counting artefact — the agent
+really is evaluating more leaves per turn. The quantity decomposes as
+
+```
+evaluations per turn  =  thinking seconds per turn  x  evaluations per thinking second
+```
+
+and paired over 6 seeds, `alpha0=0.0` against `alpha0=0.9`:
+
+| | alpha0=0.0 | alpha0=0.9 | ratio |
+|---|---|---|---|
+| evaluations per turn | 9,934 | 11,124 | 1.12x |
+| thinking seconds per turn | 2.10 | 2.38 | **1.13x** |
+| evaluations per thinking second | 4,501 | 4,574 | 1.02x |
+| turns per game | 11.00 | 12.67 | 1.15x |
+
+**All of the movement is in thinking seconds per turn; throughput is flat.**
+Thinking time is spent per *move*, not per turn: each move that reaches the
+search gets `min(0.65s, remaining/4)` out of a 9.8 s per-turn budget, while
+moves resolved by the single-legal-move short circuit or by `RootRuleBasedMove`
+cost nothing at all. So a policy that plays longer, more decision-dense turns
+spends more of that budget and evaluates more leaves per turn. The column is
+measuring a real behavioural difference between the two evaluators' play, not an
+accounting quirk.
+
+Caveat on the local measurement: at n=6 the per-seed evals/turn ratios were
+0.45, 4.47, 0.70, 0.71, 1.82, 1.98 — three down, three up. It confirms the
+mechanism and rules out a counting artefact; it does not on its own establish
+the monotone rise. That comes from the 400-game cluster runs.
 
 **The neural agent is not ONNX-bound.** The frozen `DeepSetsBot`'s own
 telemetry puts only **13–31 %** of wall clock inside

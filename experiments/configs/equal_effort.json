@@ -1,7 +1,7 @@
 {
   "name": "equal_effort",
   "description": "PLACEHOLDER -- NOT RUNNABLE AS SHIPPED. Isolates evaluation quality from search volume by giving DeepSetsBotExp whatever extra wall clock it needs to evaluate the SAME number of positions per turn as the stock-speed baseline, instead of the same wall clock. The answer to 'is the network better, or is the heuristic agent just searching more?' is this matchup's win rate. Fill in the two TBDs from a calibration run before submitting anything.",
-  "_why_alpha0_is_zero": "SOT_ALPHA0=0 on both the matchup and the calibration block, and it is load-bearing, not incidental. The question here is about the NETWORK as an evaluator. At alpha0>0 the blend window runs BOTH evaluators inside a single counted evaluation, so DeepSetsBotExp's evaluations-per-turn is depressed by work the baseline never does -- the counter measures the same event on both sides but not the same work, and the matched time scale comes out inflated. At alpha0=0 the pure-network short circuit in Evaluate() fires on every leaf and one counted evaluation is exactly one ONNX forward pass, which is the quantity that belongs on both sides of an equal-effort comparison.",
+  "_why_alpha0_is_zero": "SOT_ALPHA0=0 on both the matchup and the calibration block, and it is load-bearing. The question here is about the NETWORK as an evaluator, so the agent measured must be the network-only one, and the calibration must be run on the same agent that is benchmarked -- calibrating at 0.7 and running at 0.0 would match the wrong agent's throughput. At alpha0=0 the pure-network short circuit in Evaluate() fires on every leaf and one counted evaluation is exactly one ONNX forward pass. NOTE this is a definitional argument, not a throughput one: the blend also runs the heuristic inside the same counted evaluation, but that costs only ~1.6% of throughput (paired over 6 seeds), not the factor of 1.8 an earlier version of this note claimed. See experiments/README.md, 'Counting evaluations'.",
   "_calibration_so_far": [
     "Local pilot, 2026-09-22, 10 games, SOT_ALPHA0=0, both sides at scale 1.0, --timeout 12.",
     "NOT a substitute for a cluster run -- different hardware, and n=10 is not enough.",
@@ -9,15 +9,19 @@
     "  SakkirinaScaled 76699 evals/turn pooled  (905,048 /game, sd 31776 across games)",
     "  ratio r = 8.11x per turn pooled, 8.47x per game pooled",
     "  per-game ratio ranged 2.71x .. 21.07x; 95% CI on the mean [5.65, 13.03]",
-    "At SOT_ALPHA0=0.7 the same measurement gave 14.95x -- the blend runs both evaluators",
-    "inside one counted evaluation, which is why this config pins alpha0 to 0.",
+    "CORRECTION 2026-09-23: an earlier version of this note said a run at SOT_ALPHA0=0.7 gave",
+    "14.95x, and attributed the gap to the blend running both evaluators. That was wrong -- it",
+    "compared an n=2 run against this n=10 one, and the per-game ratio spans 2.71x..21.07x, so",
+    "the difference was sampling noise. A paired measurement over 6 seeds puts the blend's",
+    "throughput cost at ~1.6%. alpha0=0 is still pinned here, for the plain reason: this",
+    "experiment is about the NETWORK as an evaluator, so calibrate on the agent you will run.",
+    "The CI is wide enough that r should be re-derived from >=20 cluster games.",
     "COST, read before submitting: r ~ 8 means ~78s of thinking per turn, an engine --timeout",
     "near 90, roughly 18 minutes per game and about 120 core-hours for the 400 games. Submit",
     "with an explicit --time=00:45:00; slurm_experiment.sh's 00:30:00 default would kill every",
     "task. See experiments/configs/equal_effort_baseline_slowed.json for the same question asked",
     "from the other direction at a normal row's cost -- run that one first, and read the two",
-    "together. This calibration serves both configs.",
-    "The CI is wide enough that r should be re-derived from >=20 cluster games."
+    "together. This calibration serves both configs."
   ],
   "_how_to_fill_this_in": [
     "1. tools/benchmark_cluster.sh --config equal_effort --out-dir $OUT_DIR --calibrate",

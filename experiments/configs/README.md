@@ -118,10 +118,14 @@ Runs the config's `calibration` matchups sequentially (20 games by default) and
 reports mean **evaluations per turn** per agent, plus a suggested
 `SOT_TIME_SCALE` for equal effort.
 
-Calibrate at `SOT_ALPHA0=0`, which both equal-effort configs pin. Above 0, one
-counted evaluation runs *both* evaluators inside the blend window, so the
-counter measures the same event on each side but not the same work — measured at
-14.95× per turn at `alpha0=0.7` against 8.11× at `alpha0=0`.
+Calibrate at `SOT_ALPHA0=0`, which both equal-effort configs pin — **the
+experiment is about the network as an evaluator, so calibrate on the same agent
+you will benchmark.** Above 0 one counted evaluation also runs the heuristic, so
+the counter measures the same event on each side but not quite the same work;
+that effect is small, though — paired over 6 seeds, throughput moved 1.6 %
+between `alpha0=0.0` and `alpha0=0.9`. (An earlier note here put it at a factor
+of 1.8, comparing an n=2 run against an n=10 one; that was sampling noise. See
+[experiments/README.md](../README.md#counting-evaluations).)
 
 Per *turn*, not per second or per game: evals/sec is swamped by opponent
 thinking time and evals/game by game length, and both of those move when the
