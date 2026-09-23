@@ -80,7 +80,7 @@
       "env": {
         "SOT_ALPHA0": "0.0",
         "SOT_TIME_SCALE": "1.0",
-        "SOT_BASELINE_TIME_SCALE": "TBD"
+        "SOT_BASELINE_TIME_SCALE": "0.141"
       },
       "note": "DeepSetsBotExp is the fixed point here: SOT_TIME_SCALE=1.0 is exactly the timing it competes at, and SOT_ALPHA0=0 makes it the pure-network agent (behaviourally DeepSetsBot). Only the baseline's clock moves. Expected SOT_BASELINE_TIME_SCALE around 0.12; it must come from a calibration run, not from this note."
     }

@@ -56,10 +56,10 @@
       "label": "equal_effort",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaScaled",
-      "timeout": "TBD",
+      "timeout": 91,
       "env": {
         "SOT_ALPHA0": "0.0",
-        "SOT_TIME_SCALE": "TBD",
+        "SOT_TIME_SCALE": "9.0",
         "SOT_BASELINE_TIME_SCALE": "1.0"
       },
       "note": "The baseline stays at 1.0 (stock SakkirinaSolo timing) on purpose -- it is the fixed point the treatment is matched TO. Only DeepSetsBotExp's clock moves. SOT_ALPHA0=0 makes this the pure-network agent (behaviourally DeepSetsBot); see _why_alpha0_is_zero above."
