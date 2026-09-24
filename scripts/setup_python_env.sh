@@ -46,6 +46,20 @@ SKLEARN_VERSION="1.4.2"
 # Only tools/diagnose_value_net.py needs this, and only to write two PNGs.
 MATPLOTLIB_VERSION="3.8.4"
 
+# onnx (the format library) is SEPARATE from onnxruntime (the inference engine)
+# and is not pulled in by it. torch.onnx.export imports onnx at call time, so
+# without it training/export_to_onnx.py dies with ModuleNotFoundError partway
+# through -- after training has finished, which on the cluster means a seed's
+# checkpoint is on disk but its .onnx is not. That is exactly what happened
+# during the per-seed training run and had to be patched by hand.
+#
+# Version-gated by Python, because onnx >= 1.20 requires Python >= 3.10 and the
+# supported range here is 3.9-3.11 (see the PY_VER check below), so BOTH
+# branches are reachable: the cluster's Python is 3.9, a local macOS install is
+# typically 3.10/3.11.
+ONNX_VERSION_PY39="1.19.1"
+ONNX_VERSION_PY310_PLUS="1.21.0"
+
 TORCH_CPU_INDEX="https://download.pytorch.org/whl/cpu"
 # ---------------------------------------------------------------------------
 
@@ -94,7 +108,12 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
 
 PY_VER="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 case "$PY_VER" in
-  3.9|3.10|3.11) ;;
+  3.9)
+    ONNX_VERSION="$ONNX_VERSION_PY39"
+    ;;
+  3.10|3.11)
+    ONNX_VERSION="$ONNX_VERSION_PY310_PLUS"
+    ;;
   *)
     echo "ERROR: Python $PY_VER is not supported here." >&2
     echo "       torch $TORCH_VERSION publishes wheels for 3.8-3.11 only, and $TORCH_VERSION is pinned" >&2
@@ -103,6 +122,7 @@ case "$PY_VER" in
     exit 1
     ;;
 esac
+echo "Python $PY_VER -> onnx $ONNX_VERSION"
 
 if [ -d "$VENV_DIR" ] && [ "$FORCE" = "0" ]; then
   echo "venv already exists at $VENV_DIR -- nothing to do (--force to recreate)."
@@ -139,9 +159,16 @@ echo "=== Installing the rest (PyPI) ==="
 PACKAGES=(
   "numpy==$NUMPY_VERSION"
   "torch_geometric==$PYG_VERSION"
+  "onnx==$ONNX_VERSION"
   "onnxruntime==$ONNXRUNTIME_VERSION"
   "scikit-learn==$SKLEARN_VERSION"
 )
+# onnx 1.19.1 pulls ml_dtypes as a transitive dependency (0.5.4 at time of
+# writing). It is deliberately NOT pinned: every pin in this script is a direct
+# dependency of our own code, and the transitive closure -- scipy and joblib
+# under scikit-learn, filelock and sympy under torch -- is left to pip
+# throughout. Pinning one transitive package and not the others would imply a
+# guarantee this script does not make.
 if [ "$SKIP_MATPLOTLIB" = "0" ]; then
   PACKAGES+=("matplotlib==$MATPLOTLIB_VERSION")
 fi
@@ -149,16 +176,25 @@ python -m pip install "${PACKAGES[@]}"
 
 echo
 echo "=== Verifying ==="
-python - <<'PYEOF'
-import sys
-import numpy, torch, torch_geometric, onnxruntime, sklearn
+EXPECTED_ONNX="$ONNX_VERSION" python - <<'PYEOF'
+import os, sys
+import numpy, torch, torch_geometric, onnx, onnxruntime, sklearn
 
 print(f"  python           {sys.version.split()[0]}")
 print(f"  numpy            {numpy.__version__}")
 print(f"  torch            {torch.__version__}")
 print(f"  torch_geometric  {torch_geometric.__version__}")
+print(f"  onnx             {onnx.__version__}")
 print(f"  onnxruntime      {onnxruntime.__version__}")
 print(f"  scikit-learn     {sklearn.__version__}")
+
+# The gate is by Python minor version, so a mismatch here means the resolution
+# above disagrees with what pip actually installed -- worth failing on, since
+# the symptom otherwise appears much later, in export_to_onnx.py.
+expected_onnx = os.environ["EXPECTED_ONNX"]
+if onnx.__version__ != expected_onnx:
+    sys.exit(f"  ERROR: expected onnx {expected_onnx} for Python "
+             f"{sys.version_info[0]}.{sys.version_info[1]}, got {onnx.__version__}")
 try:
     import matplotlib
     print(f"  matplotlib       {matplotlib.__version__}")
@@ -176,7 +212,17 @@ if torch.version.cuda is not None:
 from torch_geometric.data import Data           # noqa: F401  training/StateParser.py
 from torch_geometric.loader import DataLoader   # noqa: F401  training/train_local.py
 from torch_geometric.nn import global_mean_pool # noqa: F401  training/ValueNetwork.py
+
+# Exercise the export path end to end on a toy model. torch.onnx.export imports
+# onnx lazily, at call time, so a missing or incompatible onnx does not show up
+# on `import torch` -- it shows up in training/export_to_onnx.py, after training
+# has already finished. Catching it here costs a fraction of a second.
+import io
+_buf = io.BytesIO()
+torch.onnx.export(torch.nn.Linear(4, 1), (torch.zeros(1, 4),), _buf, opset_version=14)
+onnx.load_from_string(_buf.getvalue())
 print()
+print("  torch.onnx.export + onnx.load round-trip OK (the path export_to_onnx.py uses).")
 print("  torch_geometric Data / DataLoader / global_mean_pool all import cleanly.")
 PYEOF
 

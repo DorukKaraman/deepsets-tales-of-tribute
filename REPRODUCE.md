@@ -108,6 +108,53 @@ from PyTorch's CPU index; the cluster partition these experiments run on has no
 GPUs, and the CUDA builds are several GB that would never be used. Python 3.12+
 is rejected, because torch 2.2.2 publishes no wheels for it.
 
+It also installs **`onnx`**, which is a separate package from `onnxruntime` and
+is not pulled in by it. `torch.onnx.export` imports it lazily, at call time, so
+a missing `onnx` does not surface on `import torch` — it surfaces inside
+`training/export_to_onnx.py`, *after* training has finished. The pin is gated by
+Python version, because `onnx >= 1.20` requires Python >= 3.10 while the
+supported range here is 3.9–3.11: **Python 3.9 → `onnx==1.19.1`, Python 3.10+ →
+`onnx==1.21.0`.** Both branches are live, as the table below shows.
+
+### The two environments that produced models
+
+| | Shipped model | Per-seed models |
+|---|---|---|
+| Where | macOS, local | cluster |
+| Python | 3.10.18 | 3.9.25 |
+| torch | 2.2.2 | 2.2.2+cpu |
+| onnx | 1.21.0 | 1.19.1 |
+
+**The `+cpu` build tag alone changes the exported ONNX hash, even for identical
+weights.** It goes into the file's `producer_version` just as the version number
+does, so a checkpoint exported under `2.2.2+cpu` and the same checkpoint exported
+under `2.2.2` produce byte-different files. The per-seed models' hashes therefore
+differ from the shipped model's **for reasons that have nothing to do with their
+weights**, and a mismatch between them is not evidence that anything is wrong.
+
+The two environments differ on three axes, and only the torch build tag matters.
+Re-exporting `models/deepsets_value_network.pth` through
+`training/export_to_onnx.py` reproduces the shipped hash
+`86e0f9a8…a915` under all of:
+
+| Python | torch | onnx | Exported hash |
+|---|---|---|---|
+| 3.10.18 | 2.2.2 | 1.21.0 | shipped hash (this is the shipped model) |
+| 3.11.16 | 2.2.2 | 1.21.0 | shipped hash |
+| 3.9.13 | 2.2.2 | 1.19.1 | shipped hash |
+
+So **neither the Python minor version nor the `onnx` library version moves the
+hash** — which is worth knowing, because it means the version gate above is
+about installability only and has no bearing on reproducibility. The torch build
+tag is the one axis left, and it is the one the cluster differs on.
+
+This is the same mechanism described under [Reproducing the model file byte for
+byte](#reproducing-the-model-file-byte-for-byte); it is called out here because
+the two environments differ in practice, so it is a situation you will actually
+hit rather than a hypothetical. The practical consequence is the one already
+built into the harness: `allowed_onnx_sha256` is a *list*, and a per-seed model's
+hash is added to it rather than chased back to the shipped model's.
+
 `fetch_baselines.sh` also derives `SakkirinaScaled` (see
 [the experiments](#7-paper-experiments)) alongside `SakkirinaGen` and
 `SakkirinaHalf`.
