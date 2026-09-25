@@ -633,13 +633,13 @@ it is still not skippable.
 
 ## 7. Paper experiments
 
-Three questions across four configs — equal effort is asked twice, once from
+Four questions across five configs — equal effort is asked twice, once from
 each direction. One harness, one build. Each config is a JSON file in
 [`experiments/configs/`](experiments/configs/) — see
 [that directory's README](experiments/configs/README.md) for the format, and
 [`experiments/README.md`](experiments/README.md) for the agents they use.
 
-All four run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
+All five run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
 environment hooks and nothing else changed. The submitted agents stay
 byte-identical; `SOT_ALPHA0=0` makes the copy behave as `DeepSetsBot` and the
 default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
@@ -650,6 +650,7 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 | `time_scaling` | Does the advantage hold as the per-turn budget moves 2 s → 30 s? | 2000 |
 | `equal_effort` | Is the network better, or is the baseline just searching more? Treatment sped up. | 400 |
 | `equal_effort_baseline_slowed` | The same question, baseline slowed down instead. | 400 |
+| `seed_benchmark` | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. | 2400 |
 
 ### Equal effort is run in both directions
 
@@ -773,6 +774,108 @@ engine's own "other factors" counter does) would make a budget that is simply
 too tight look like an agent that is simply worse. `time_scaling.json` sets
 engine `--timeout` to budget + 2 s to keep timeouts near zero; **if they are
 not, raise the margin and re-run the row rather than reporting its win rate.**
+
+### Seed benchmark results
+
+Job 4459158 (tasks 0–1999) plus the shipped row kept from job 4457064 (tasks
+2000–2399): **240 COMPLETED, 0 WARN**, every game clean — no timeouts, no
+disqualifications, nothing excluded.
+
+**Check the throughput column before reading the win rates.** The seed rows
+returned 5,771–6,921 evaluations per turn against the shipped row's 6,401, so
+they straddle it rather than sitting at a quarter of it. The denormal fix took,
+and these rows are comparing models at comparable search. (The first run of this
+config failed exactly here; see
+[`seed_benchmark.json`](experiments/configs/seed_benchmark.json)'s
+`_first_run_was_invalid`, and the paired experiment it accidentally produced,
+below.)
+
+| Model | Win rate | 95% CI | as P1 | as P2 | evals/turn | val loss |
+|---|---|---|---|---|---|---|
+| seed 0 | 75.00% | 70.5–79.0 | 84.5% | 65.5% | 5,986 | 0.4385 |
+| seed 1 | 75.00% | 70.5–79.0 | 83.0% | 67.0% | 5,865 | 0.4369 |
+| seed 2 | 78.00% | 73.7–81.8 | 83.5% | 72.5% | 5,771 | 0.4402 |
+| seed 3 | 76.00% | 71.6–79.9 | 86.0% | 66.0% | 6,207 | 0.4329 |
+| seed 4 | 69.25% | 64.6–73.6 | 82.0% | 56.5% | 6,921 | 0.4470 |
+| **shipped** | **80.25%** | 76.1–83.9 | 85.5% | 75.0% | 6,401 | — |
+
+Seed mean **74.65%**, SD **3.26** points against binomial noise of ~2.17 points
+per row. Homogeneity across the five seeds: χ² ≈ 9.0, df 4, **p ≈ 0.06** — so
+the spread is a little wider than sampling alone predicts, but it does not clear
+the conventional threshold, and it is not evenly distributed. Drop seed 4 and
+the remaining four give χ² ≈ 1.3 on df 3 (p ≈ 0.7): seeds 0–3 are as tight as
+400-game samples of one underlying model would be. Whatever between-seed
+variation exists here is essentially one seed's worth.
+
+#### The shipped model is top of the distribution, and this experiment cannot say why
+
+It beats the seed pool by **+5.6 points** (z ≈ 2.4, p ≈ 0.02) — statistically
+real. But it is **confounded, and not repairably so within this experiment**: it
+differs from the five seeds in training platform and environment (Apple Silicon,
+Python 3.10) as well as in seed. "The shipped model got a lucky seed" and "the
+shipped model's environment produced a better model" predict exactly this result
+and cannot be told apart from it. Do not report the +5.6 as a seed effect, and
+do not report it as an environment effect either.
+
+Its **+2.25 over the best individual seed is not significant** (z ≈ 0.8,
+p ≈ 0.43). The defensible statement is that the shipped model sits at the top of
+a distribution whose spread is roughly three points, not that it is better than
+the models in it.
+
+#### Seed 4 is the outlier, and the comparison is post hoc
+
+At 69.25% it is **6.75 points below the other four pooled** (z ≈ 2.8,
+p ≈ 0.006). That p-value is the one to distrust: seed 4 was selected for testing
+*because* it looked low, so the nominal significance is inflated by an unknown
+amount and should be read as "worth a second look", not as a finding.
+
+Noted without over-reading it: seed 4 has both the **highest validation loss**
+(0.4470) and the **highest evaluations per turn** (6,921). It searches the most
+and plays the worst. With n = 5 that is an observation, not a relationship —
+across all five, val loss and win rate do not line up cleanly either (seed 3 has
+the best loss and the second-best win rate; seed 2 has the third-best loss and
+the best win rate).
+
+#### The invalid first run is an accidental paired experiment
+
+This is the most informative thing in the section, and nobody designed it.
+
+The first run measured the same five models on the same 400 games each, with one
+difference: the unflushed models searched roughly **4.5× less** (about 1,400
+evaluations per turn against about 6,150 now). The models themselves were
+identical — `tools/compare_onnx_models.py` found zero output difference across
+2000 real states per seed, so flushing changed the speed and nothing else.
+
+| | evals/turn | seed win rates | mean |
+|---|---|---|---|
+| First run (unflushed) | ~1,400 | 78.5 / 75.5 / 79.5 / 78.0 / 68.0 | **75.90%** |
+| Rerun (flushed) | ~6,150 | 75.0 / 75.0 / 78.0 / 76.0 / 69.25 | **74.65%** |
+
+**A 1.25-point difference from quartering the search volume** — unpaired z ≈ 0.9,
+p ≈ 0.36, against a ~1-point standard error on each 2000-game mean. No
+detectable effect.
+
+That is a **fourth independent line of evidence for the same conclusion** as
+[`time_scaling`](experiments/configs/time_scaling.json) (flat across a 15×
+budget range) and both equal-effort directions
+([sped up](experiments/configs/equal_effort.json),
+[baseline slowed](experiments/configs/equal_effort_baseline_slowed.json)): **in
+this matchup, search volume barely moves the win rate.**
+
+It is arguably the cleanest of the four, because nothing was deliberately
+varied. Identical models, identical games, identical everything except a
+confound that was accidental and complete — which is to say there was no
+experimenter degree of freedom in it at all. The other three each required
+choosing a scale, a budget or a matching criterion.
+
+One caveat and one opportunity. The caveat: this is an unpaired comparison of
+two aggregates, which is the weaker test. The opportunity: the games are the
+same games, so a per-game paired analysis (McNemar over the discordant games) is
+possible and would be considerably more sensitive than z ≈ 0.9. The first run's
+per-game result files are archived at
+`experiment_results/calibration/seed_benchmark_unflushed_seeds/`, so that
+analysis can still be run — and if this line of evidence is going to carry
+weight in the write-up, it is worth running.
 
 ## 8. Held-out evaluation
 
