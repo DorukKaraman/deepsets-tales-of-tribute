@@ -60,7 +60,11 @@
 #SBATCH --partition=CHANGE_ME_PARTITION
 #SBATCH --array=0-4
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+# 24G: the shuffle buffer (training/stream_dataset.py,
+# DEFAULT_SHUFFLE_BUFFER_SIZE = 100,000 parsed graphs) dominates memory here, so
+# this scales with that constant rather than with the dataset size. A 16 GB run
+# pressed against its ceiling.
+#SBATCH --mem=24G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/train_%A_%a.out
 #SBATCH --error=logs/train_%A_%a.err

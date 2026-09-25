@@ -305,6 +305,65 @@ single-threaded by construction), this asks for 8 cores and pins the thread
 count to the allocation — left unset, OpenMP sizes itself from the machine's
 total core count rather than the cgroup's.
 
+#### How the five seed models were actually produced
+
+Recorded because the run needed two manual interventions and one judgement call
+about the split, none of which are recoverable from the artefacts alone.
+
+**The split.** It was rebuilt on the cluster rather than transferred, and is
+identical to the shipped model's **by construction, not by direct comparison**:
+the input data matches by SHA-256 manifest, `tools/split_dataset.py` is
+byte-identical across all four copies checked, `random.Random(0).shuffle`
+produces the same ordering on Python 3.10.18 and 3.9.25, and the resulting game
+counts match. What could *not* be done is the direct check — comparing the two
+splits' game IDs — because the original split files had been deleted. Every link
+in the chain is verified; the end-to-end equality is inferred from them. If a
+seed model ever behaves oddly in a way that points at its training data, this is
+the assumption to attack first.
+
+**Environment.** Python 3.9.25, torch 2.2.2+cpu, onnx 1.19.1 — the cluster
+column of the [two-environments table](#the-two-environments-that-produced-models)
+in Prerequisites, which is also why these ONNX hashes differ from the shipped
+model's for reasons unrelated to their weights.
+
+**Memory.** Seed 0 peaked at *exactly* its 16 GB request, which is the signature
+of a job pressing against its ceiling rather than one that happened to need
+precisely that much — treat 16 GB as a lower bound, not a measurement. Seeds 1–4
+were given 24 GB and ran without incident. `scripts/slurm_train.sh` now defaults
+to 24 GB.
+
+**Two interventions, neither requiring retraining.** Seed 0's in-job export died
+on the missing `onnx` package and was exported by hand afterwards; seeds 3 and 4
+were rejected by the old fixed export tolerance and were re-exported once that
+was fixed. Both causes are now fixed at the source — `onnx` is pinned in
+`scripts/setup_python_env.sh`, and the tolerance is relative as described in
+[Export to ONNX](#4-export-to-onnx) — so a rerun should need neither.
+
+**Results.**
+
+| Seed | Best val loss | ONNX SHA-256 |
+|---|---|---|
+| 0 | 0.4385 | `22558ce2719dd0ed2832889b6c48450c756deafef2cdedecd115189ac89ea749` |
+| 1 | 0.4369 | `88a73e81e194e7b258597a7a043d5faf69125f5aed878aeeb82dea6e88df23a4` |
+| 2 | 0.4402 | `757bcee975fe3dadcb568bbe678a3a371004ee20b41b4fffbfe0598b522e0b16` |
+| 3 | 0.4329 | `1e5ad7165c5fb94656faf94073dd29409506d5098aff774a459a15d9586ef646` |
+| 4 | 0.4470 | `9cd893be9ffcdb0d7fb4429a7178d9319b920d281a874efda179b999c8ad4201` |
+
+Mean 0.4391, sd 0.005. Those hashes are what go into a config's
+`allowed_onnx_sha256` when a seed's model is benchmarked via `SOT_MODEL_PATH`.
+
+**These val losses are not comparable to the shipped model's 0.4034.** That
+figure was measured on a different validation set, so the gap between it and
+this table says nothing about either. Compare the five seeds against each other,
+or score them all on one common set with `tools/evaluate_checkpoints.py` — that
+is what it is for.
+
+The spread is also **tighter than the ±0.02 run-to-run variation measured in
+August**, and the two are not measuring the same thing: the August figure
+predates the shuffle-buffer seeding fix, so it mixed genuine seed-to-seed
+variation with nondeterministic data ordering. The 0.005 here is the former
+alone, which is the quantity that belongs next to a mean.
+
 **We do not have the shipped model's training metrics.** The run that produced
 it (8 August 2026) left only the checkpoint and the exported ONNX behind; no
 `training_metrics.json` from that run survives, and its wall-clock cost was not
