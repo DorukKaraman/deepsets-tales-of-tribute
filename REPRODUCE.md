@@ -775,6 +775,86 @@ too tight look like an agent that is simply worse. `time_scaling.json` sets
 engine `--timeout` to budget + 2 s to keep timeouts near zero; **if they are
 not, raise the margin and re-run the row rather than reporting its win rate.**
 
+### Alpha sweep results
+
+`DeepSetsBotExp` vs SakkirinaSolo, `--timeout 10`, 400 games per row.
+
+| alpha0 | Win rate | 95% CI | as P1 | as P2 | evals/turn |
+|---|---|---|---|---|---|
+| 0.0 (pure network) | 79.3% | 75.0–82.9 | 88.5% | 70.0% | 6,722 |
+| 0.3 | 80.5% | 76.3–84.1 | 87.5% | 73.5% | 7,595 |
+| **0.5** | **82.0%** | 77.9–85.5 | 89.0% | 75.0% | 7,955 |
+| 0.7 (the submission) | 74.8% | 70.3–78.8 | 89.0% | 60.5% | 8,605 |
+| 0.9 | 71.8% | 67.2–75.9 | 82.0% | 61.5% | 9,669 |
+
+Flat or slightly rising to 0.5, then falling. The first three are within noise of
+each other (0.0 vs 0.5 is z ≈ 1.0, p ≈ 0.33), so the sweep does not establish a
+peak at 0.5 so much as a plateau from 0.0 to 0.5. The fall afterwards is real at
+the far end — **0.5 vs 0.9 is 10.2 points, z ≈ 3.4**, which survives a Bonferroni
+correction for the 10 pairwise comparisons available (p ≈ 0.006 corrected). 0.5
+vs 0.7 is 7.2 points, z ≈ 2.5, which does **not** survive correction (p ≈ 0.13
+corrected) and should be read as suggestive only.
+
+**The submitted `alpha0 = 0.7` is past the peak and no better than the pure
+network** (0.0 vs 0.7: 79.3% against 74.8%). Note what this does and does not
+say: it is a local measurement against one opponent, and `DeepSetsBlendBot` —
+the 0.7 agent — is the configuration that won the tournament across the whole
+field. This sweep is evidence about this matchup, not a verdict on the
+submission.
+
+Reported as an observation rather than a finding: **the drop from 0.5 to 0.7 is
+almost entirely in the P2 seat** — 75.0% → 60.5% as P2, while P1 is identical at
+89.0% in both. Nothing in the agent is seat-aware, so this is either a real
+interaction with first-player advantage or a coincidence in two 200-game
+half-samples. It was not predicted in advance and no test here is corrected for
+having gone looking.
+
+### Time scaling results
+
+`DeepSetsBotExp` vs `SakkirinaScaled`, the same scale applied to both sides,
+400 games per row. **This config runs the blend agent at `alpha0 = 0.7`** (the
+default), so it is not the same agent as the equal-effort rows below.
+
+| Budget | Win rate | 95% CI | as P1 | as P2 | ours/turn | baseline/turn | ratio |
+|---|---|---|---|---|---|---|---|
+| 2 s | 76.0% | 71.6–79.9 | 87.5% | 64.5% | 1,406 | 6,296 | 4.5× |
+| 5 s | 79.5% | 75.3–83.2 | 86.0% | 73.0% | 3,981 | 21,110 | 5.3× |
+| 10 s | 80.5% | 76.3–84.1 | 90.0% | 71.0% | 7,770 | 44,228 | 5.7× |
+| 20 s | 77.0% | 72.6–80.9 | 90.0% | 64.0% | 14,552 | 88,657 | 6.1× |
+| 30 s | 75.3% | 70.8–79.2 | 83.0% | 67.5% | 22,224 | 133,129 | 6.0× |
+
+**Every interval overlaps every other.** The largest gap, 10 s vs 30 s at 5.2
+points, is z ≈ 1.8 (p ≈ 0.08) before any correction for the ten comparisons
+available — not significant. Across the full span the agent does **15.8× more
+searching at 30 s than at 2 s and wins 0.7 points less**.
+
+The throughput ratio column is worth its own glance: the baseline evaluates 4.5–6×
+more positions per turn than we do at every budget, and that disadvantage is
+roughly constant across a 15× range of clock. Whatever is producing the win rate,
+it is not search volume.
+
+### Equal effort results
+
+Both directions, `alpha0 = 0` (pure network), 400 games each. See
+[Equal effort is run in both directions](#equal-effort-is-run-in-both-directions)
+for why both were run.
+
+| Direction | Setting | Win rate | 95% CI | as P1 | as P2 | Achieved effort |
+|---|---|---|---|---|---|---|
+| Baseline slowed | `SOT_BASELINE_TIME_SCALE = 0.141` | 79.5% | 75.3–83.2 | 88.0% | 71.0% | 6,433 vs 6,627 — within 3 % |
+| Treatment sped up | `SOT_TIME_SCALE = 9.0` | 76.5% | 72.1–80.4 | 88.5% | 64.5% | 43,139 vs 49,131 — 0.88× |
+
+**The two directions agree**, which was the design's own criterion for believing
+either: they are not significantly different from each other (z ≈ 1.0, p ≈ 0.31),
+and neither differs from the stock-timing 79.3% at `alpha0 = 0` from the alpha
+sweep (z ≈ 0.07 and z ≈ 0.95).
+
+So equalising search — in either direction, at either end of a 7× clock
+adjustment — leaves the win rate where it was. And recall that both directions
+landed with the DeepSets agent doing slightly *less* work than the baseline
+(0.97× and 0.88×), so the residual mismatch runs against the conclusion rather
+than for it.
+
 ### Seed benchmark results
 
 Job 4459158 (tasks 0–1999) plus the shipped row kept from job 4457064 (tasks
@@ -851,31 +931,87 @@ identical — `tools/compare_onnx_models.py` found zero output difference across
 | First run (unflushed) | ~1,400 | 78.5 / 75.5 / 79.5 / 78.0 / 68.0 | **75.90%** |
 | Rerun (flushed) | ~6,150 | 75.0 / 75.0 / 78.0 / 76.0 / 69.25 | **74.65%** |
 
-**A 1.25-point difference from quartering the search volume** — unpaired z ≈ 0.9,
-p ≈ 0.36, against a ~1-point standard error on each 2000-game mean. No
-detectable effect.
+A 1.25-point difference from quartering the search volume. Because the two runs
+played **the same games**, this can be tested pair by pair rather than as two
+aggregates, which is the stronger analysis — McNemar over the games whose outcome
+changed.
 
-That is a **fourth independent line of evidence for the same conclusion** as
-[`time_scaling`](experiments/configs/time_scaling.json) (flat across a 15×
-budget range) and both equal-effort directions
-([sped up](experiments/configs/equal_effort.json),
-[baseline slowed](experiments/configs/equal_effort_baseline_slowed.json)): **in
-this matchup, search volume barely moves the win rate.**
+The pairing was verified rather than assumed: both runs have the same task ids,
+the same task → seed map, the same seat assignments, and no draws or non-clean
+games in either, so all 400 pairs per row match exactly and none are excluded.
 
-It is arguably the cleanest of the four, because nothing was deliberately
-varied. Identical models, identical games, identical everything except a
-confound that was accidental and complete — which is to say there was no
-experimenter degree of freedom in it at all. The other three each required
-choosing a scale, a budget or a matching criterion.
+| Row | b (first W, rerun L) | c (first L, rerun W) | Discordant | Agreement | χ²(1) | Exact p |
+|---|---|---|---|---|---|---|
+| seed 0 | 58 | 44 | 102 | 74.5% | 1.66 | 0.198 |
+| seed 1 | 51 | 49 | 100 | 75.0% | 0.01 | 0.920 |
+| seed 2 | 50 | 44 | 94 | 76.5% | 0.27 | 0.606 |
+| seed 3 | 53 | 45 | 98 | 75.5% | 0.50 | 0.480 |
+| seed 4 | 65 | 70 | 135 | 66.2% | 0.12 | 0.731 |
+| **Pooled** | **277** | **252** | **529** | **73.5%** | **1.09** | **0.297** |
 
-One caveat and one opportunity. The caveat: this is an unpaired comparison of
-two aggregates, which is the weaker test. The opportunity: the games are the
-same games, so a per-game paired analysis (McNemar over the discordant games) is
-possible and would be considerably more sensitive than z ≈ 0.9. The first run's
-per-game result files are archived at
-`experiment_results/calibration/seed_benchmark_unflushed_seeds/`, so that
-analysis can still be run — and if this line of evidence is going to carry
-weight in the write-up, it is worth running.
+χ² is the continuity-corrected McNemar statistic; the exact p is the two-sided
+binomial on the discordant pairs. **No row is significant and neither is the
+pool.** Quartering the search volume moved nothing detectable, on the most
+sensitive test the data supports.
+
+The pairing helped, though less than one might hope: the standard error on the
+difference falls from 1.36 points unpaired to **1.15 points paired**. The reason
+is in the agreement column — the two runs agree on only 73.5% of games, against
+62.8% expected if they were independent. A shared seed fixes the opening deal,
+not the game: the search is wall-clock budgeted and its trajectory diverges
+anyway. So the pairing removes the variance due to which cards were dealt, and
+leaves the variance due to play. (Seed 4 is again the outlier — lowest agreement
+at 66.2%, most discordant pairs at 135.)
+
+**This is the cleanest of the four search-volume results**, because nothing was
+deliberately varied. Identical models — `compare_onnx_models.py` verified zero
+output difference — identical games, identical everything except a confound that
+was accidental and complete. There was no experimenter degree of freedom in it
+at all, where the other three each required choosing a scale, a budget or a
+matching criterion. See [Search volume: four experiments, one
+answer](#search-volume-four-experiments-one-answer).
+
+The first run's per-game files are archived at
+`experiment_results/calibration/seed_benchmark_unflushed_seeds/`, with a
+`README.txt` marking them invalid as win rates. They remain valid as the other
+arm of this comparison, which is the reason to keep them.
+
+### Search volume: four experiments, one answer
+
+Four of the results above bear on the same question from different directions,
+and **the convergence is the result — not any single row.**
+
+| Evidence | What was varied | Search change | Win-rate effect |
+|---|---|---|---|
+| `time_scaling` | Per-turn budget, both sides | 15.8× across the span | −0.7 pts, every interval overlapping |
+| `equal_effort`, baseline slowed | Baseline's clock, ÷7 | matched to within 3 % | 79.5% vs 79.3% stock (z ≈ 0.07) |
+| `equal_effort`, treatment sped up | Our clock, ×9 | matched to 0.88× | 76.5% vs 79.3% stock (z ≈ 0.95) |
+| Seed benchmark, accidental pair | Nothing — inference speed only | ~4.5× | −1.25 pts, McNemar p ≈ 0.30 |
+
+**In this matchup, search volume barely moves the win rate.** Four experiments,
+four different mechanisms for changing it, no detectable effect in any of them.
+
+The four are not equally strong, and they fail in different ways, which is what
+makes the agreement worth something:
+
+- `time_scaling` varies the budget for **both** agents, so it tests whether the
+  matchup as a whole is budget-sensitive, not whether *our* search matters.
+- The two `equal_effort` directions each move **one** side, and each distorts
+  the agent it moves — one gets a budget no tournament would give it, the other
+  runs at a seventh of what it was tuned for.
+- The **accidental pair is the cleanest**: identical models, identical games,
+  nothing deliberately varied, no experimenter degree of freedom, and the only
+  one testable pair-by-pair rather than as two aggregates.
+
+Each could be explained away on its own. Explaining away all four requires four
+separate explanations pointing the same direction.
+
+**What this does not license.** These are all one matchup — `DeepSetsBotExp`
+against SakkirinaSolo or a rescaled copy of it — measured locally, at 400 games
+per cell. "Search volume does not matter in this matchup" is supported. "Search
+volume does not matter" is not, and neither is any claim about the tournament
+field, where the same agents met seven other opponents on someone else's
+hardware. See [Which numbers come from where](#which-numbers-come-from-where).
 
 ## 8. Held-out evaluation
 
