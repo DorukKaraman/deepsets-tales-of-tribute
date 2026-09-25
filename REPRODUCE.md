@@ -134,8 +134,10 @@ weights**, and a mismatch between them is not evidence that anything is wrong.
 
 The two environments differ on three axes, and only the torch build tag matters.
 Re-exporting `models/deepsets_value_network.pth` through
-`training/export_to_onnx.py` reproduces the shipped hash
-`86e0f9a8…a915` under all of:
+`training/export_to_onnx.py --no-flush` (the shipped file predates denormal
+flushing, so reproducing it means reproducing that condition too — see [Denormal
+flushing](#denormal-flushing-and-why-the-export-is-platform-dependent))
+reproduces the shipped hash `86e0f9a8…a915` under all of:
 
 | Python | torch | onnx | Exported hash |
 |---|---|---|---|
@@ -416,6 +418,79 @@ graph is wrong, and the pooling operator is the first thing to check.
 
 It prints the output's size and SHA-256. Runtime: seconds.
 
+### Denormal flushing, and why the export is platform-dependent
+
+**By default the export zeroes every weight with `|w| < 1e-30`**, on a copy — the
+`.pth` is never modified, so the validation losses reported for a checkpoint
+remain the losses of the weights that produced them. `--no-flush` turns it off.
+
+This is a performance fix, not a numerical one. Subnormal arithmetic falls off
+onnxruntime's fast path, and on the cluster `seed_00` measured a **median
+870.7 µs per inference against 52.4 µs for a flushed copy — roughly 17×**, over
+5000 real validation states. In the benchmark that showed up as the seed models
+getting ~1,400 evaluations per turn where the shipped model got ~6,400, in a
+comparison whose entire premise was that they searched equally. It invalidated
+all five seed rows.
+
+**It is platform-dependent, and that is the part worth remembering.** x86
+executes subnormals slowly; Apple Silicon flushes them to zero in hardware and
+pays nothing. Train on x86 and export without flushing and you get an agent that
+is *correct* and several times slower than the one described here — which would
+make this repository's throughput figures look unreproducible when the models
+are in fact fine. That is the failure mode the default is there to prevent.
+
+**The 17× is a cluster measurement and does not reproduce on a Mac.** Because
+Apple Silicon flushes denormals in hardware, the same comparison there shows
+roughly 1× — subnormal weights cost nothing, so there is no gap to see. Measured
+while building this: on an M1, a float32 matmul against an all-subnormal operand
+ran at 0.87× the time of a normal one, and comparing the shipped model against a
+copy with 22% of its weights forced subnormal gave a timing ratio of 1.00×.
+Checking the claim on a laptop and concluding it was imaginary is the easy
+mistake here; run the timing check on the same x86 hardware the benchmark runs
+on. `tools/compare_onnx_models.py` detects this situation and warns rather than
+letting a 1× ratio read as reassurance — its header quotes 38× for `seed_00`
+against the *shipped model*, where the 17× here is `seed_00` against a *flushed
+copy of itself*: same phenomenon, different baseline, and the latter is the
+cleaner comparison because only the flush differs.
+
+The threshold sits far above the float32 subnormal boundary of ~1.18e-38, which
+looks arbitrary and is not: zeroing *only* the subnormal weights left `seed_00`
+at 130 µs rather than 52 µs, because weights that are merely near-subnormal
+still produce subnormal *intermediates* once multiplied by inputs below 1. 1e-30
+is an empirical value that clears it; 1e-20 and 1e-12 were also tested and also
+gave zero output change.
+
+Safety was checked on real states, not synthetic ones —
+`tools/compare_onnx_models.py` compared `seed_00` before and after over 5000
+validation states: max absolute difference exactly 0, zero states differing,
+zero prediction changes. The in-export verification is a second, independent
+check of the same thing, because it compares the *flushed* ONNX against the
+*unflushed* PyTorch model.
+
+> **The shipped model carries the same dead floor.** It contains no subnormal
+> weights, but it does contain **16,017 weights (21.9%) between 1.2e-38 and
+> 1e-30** — sitting just above the boundary rather than below it — and the flush
+> zeroes those too. So an export of that checkpoint has two possible hashes:
+>
+> | Export | SHA-256 |
+> |---|---|
+> | `--no-flush` | `86e0f9a8…a915` — the shipped file |
+> | default (flushed) | `b6ce22dc…a76e` |
+>
+> **These are the same model, not two models.** Compared over 800 real states,
+> the two exports give a maximum absolute difference of *exactly zero* — no state
+> differs at all, no prediction changes. The weights the flush removes are dead:
+> they contribute nothing to any output the agent has ever produced. Only the
+> bytes differ.
+>
+> `--no-flush` is therefore not a caveat attached to the flush; it is how you
+> reproduce a file that was made before the flush existed. Reproducing
+> `86e0f9a8…a915` means reproducing the conditions it was exported under, and
+> `--no-flush` is one of those conditions in exactly the way `torch==2.2.2` is.
+> Nothing needs re-exporting: the shipped file is the one every
+> `allowed_onnx_sha256` and `models/SHA256SUMS` already refer to, and flushing
+> would not have changed how it plays.
+
 ## Reproducing the model file byte for byte
 
 **The shipped `DeepSetsValueNetwork.onnx` was exported with PyTorch 2.2.2.**
@@ -431,7 +506,12 @@ weights — but a different file hash.
 So:
 
 - To reproduce `86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915`
-  exactly, pin `torch==2.2.2`.
+  exactly, pin `torch==2.2.2` and pass `--no-flush`. Both are the same kind of
+  requirement: that file was exported before denormal flushing existed, so
+  reproducing it means reproducing the conditions it was made under. A flushed
+  export of the same checkpoint has a different hash but is **the same model** —
+  bit-identical outputs on 800 real states. See [Denormal
+  flushing](#denormal-flushing-and-why-the-export-is-platform-dependent).
 - On any other version, **a hash mismatch is expected and is not an error.**
   Verify the weights instead: load `models/deepsets_value_network.pth` and
   compare its 12 tensors against the ONNX initializers. They match exactly.
