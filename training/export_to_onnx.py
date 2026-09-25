@@ -39,11 +39,54 @@ class ONNXWrapper(torch.nn.Module):
         return self.evaluator(torch.cat([pooled, g], dim=1))
 
 
+# Agreement tolerance: |torch - onnx| <= VERIFY_ATOL + VERIFY_RTOL * |torch|,
+# the same combined form numpy.allclose uses.
+#
+# WHY NOT A FIXED ABSOLUTE BOUND. This check used to demand |diff| < 1e-5 flat,
+# which silently assumes the outputs are small. They are not, necessarily: this
+# network emits a raw logit, and on real board states the shipped export printed
+# values from -52 to +43. One ULP of float32 is 2^-17 at magnitude 16, 2^-16 at
+# 128, 2^-15 at 256 -- so at an output of 128 a single correctly-rounded bit of
+# difference is already 1.526e-05 and fails a 1e-5 bound.
+#
+# That is exactly what happened to seeds 3 and 4, at 3.052e-05 and 1.526e-05:
+# both are 1 ULP at their output magnitudes, and the relative error in both was
+# ~1.2e-7, which IS float32 epsilon. The exports were correct; the tolerance was
+# wrong.
+#
+# It went unnoticed because the check feeds torch.randn inputs rather than real
+# states, and for most checkpoints those happen to land on small outputs where
+# 1 ULP fits under 1e-5. Nothing enforced that -- a different seed's weights map
+# the same random inputs somewhere larger. So this was latent from the start,
+# not a regression.
+#
+# rtol=1e-6 is roughly 10x float32 epsilon: loose enough for accumulated
+# rounding across a dozen layers, tight enough that a real graph-level bug
+# (wrong operator, wrong pooling, transposed weights) is nowhere near it -- the
+# global_mean_pool export bug this script exists to prevent produced errors of
+# order 1, not 1e-6.
+VERIFY_ATOL = 1e-5
+VERIFY_RTOL = 1e-6
+
+
 def verify_export(base_model, onnx_filename):
     import onnxruntime as ort
     base_model.eval()
-    sess = ort.InferenceSession(onnx_filename, providers=["CPUExecutionProvider"])
-    worst = 0.0
+
+    # Single-threaded on purpose. This is a correctness check that runs one
+    # small graph at a time, so a thread pool buys nothing; left to size itself,
+    # onnxruntime opens one thread per core on the MACHINE, and inside an
+    # 8-core SLURM allocation that means a burst of pthread_setaffinity_np
+    # errors for cores the job was never given. Matches what the bot's own
+    # ValueNetworkEvaluator does in Bots/src/DeepSetsCore.cs.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(onnx_filename, opts, providers=["CPUExecutionProvider"])
+
+    worst_abs = 0.0
+    worst_rel = 0.0
+    failures = []
     for n in [1, 2, 3, 5, 15, 16, 25, 40, 60]:
         x = torch.randn(n, NODE_DIM, dtype=torch.float32)
         u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
@@ -55,13 +98,40 @@ def verify_export(base_model, onnx_filename):
             "node_features": x.numpy(),
             "global_features": u.numpy(),
         })[0].reshape(-1)[0])
-        d = abs(ref - got)
-        worst = max(worst, d)
-        print(f"  n={n:>3}  torch={ref:+.6f}  onnx={got:+.6f}  diff={d:.2e}")
-    if worst >= 1e-5:
+
+        abs_d = abs(ref - got)
+        # |ref| == 0 makes relative error undefined; the combined tolerance
+        # falls back to atol there, which is the right behaviour anyway.
+        rel_d = abs_d / abs(ref) if ref != 0.0 else float("nan")
+        tol = VERIFY_ATOL + VERIFY_RTOL * abs(ref)
+        ok = abs_d <= tol
+
+        worst_abs = max(worst_abs, abs_d)
+        if rel_d == rel_d:  # not NaN
+            worst_rel = max(worst_rel, rel_d)
+
+        rel_txt = f"{rel_d:.3e}" if rel_d == rel_d else "n/a"
+        print(f"  n={n:>3}  torch={ref:+.6f}  onnx={got:+.6f}  "
+              f"abs={abs_d:.3e}  rel={rel_txt}  tol={tol:.3e}{'' if ok else '   <-- FAIL'}")
+        if not ok:
+            failures.append((n, ref, got, abs_d, rel_d, tol))
+
+    if failures:
+        detail = "\n".join(
+            f"    n={n}: torch={ref:+.6f} onnx={got:+.6f} abs={abs_d:.3e} "
+            f"rel={rel_d:.3e} > tol={tol:.3e}"
+            for n, ref, got, abs_d, rel_d, tol in failures)
         raise RuntimeError(
-            f"EXPORT VERIFICATION FAILED: max diff {worst:.3e} over {onnx_filename}")
-    print(f"Export verified: max diff {worst:.3e}")
+            f"EXPORT VERIFICATION FAILED for {onnx_filename}: "
+            f"{len(failures)} of 9 node counts outside tolerance "
+            f"(atol={VERIFY_ATOL:.1e}, rtol={VERIFY_RTOL:.1e}).\n{detail}\n"
+            f"  A relative error near 1e-7 is float32 rounding and means the "
+            f"TOLERANCE is wrong, not the export.\n"
+            f"  A relative error orders of magnitude above that means the graph "
+            f"is wrong -- check the pooling op first (see ONNXWrapper above).")
+
+    print(f"Export verified: max abs diff {worst_abs:.3e}, max rel diff {worst_rel:.3e} "
+          f"(atol={VERIFY_ATOL:.1e}, rtol={VERIFY_RTOL:.1e})")
 
 
 def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueNetwork.onnx"):
@@ -83,10 +153,24 @@ def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueN
     # Dummy U: [1 graph, GLOBAL_DIM global features]
     dummy_u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
 
+    # VERIFY BEFORE PUBLISHING. Export to a temporary name alongside the real
+    # one, verify that, and only rename into place once it passes. Writing
+    # straight to onnx_filename left an UNVERIFIED model on disk whenever
+    # verification failed -- and with no SHA256SUMS beside it, since
+    # scripts/slurm_train.sh only reaches that step if this one exits 0. Seeds 3
+    # and 4 are sitting in exactly that state: a plausible-looking .onnx that
+    # nothing ever checked.
+    #
+    # Same directory as the target so the rename is atomic (os.replace across
+    # filesystems is not), and pid-tagged so two concurrent exports cannot
+    # collide. The filename is not part of the model, so the temp name does not
+    # change a byte of what lands at onnx_filename.
+    tmp_filename = f"{onnx_filename}.tmp{os.getpid()}"
+
     torch.onnx.export(
         wrapped_model,
         (dummy_x, dummy_u),  # The tuple of raw tensor inputs -- no batch_mapping
-        onnx_filename,
+        tmp_filename,
         export_params=True,
         opset_version=14,
         do_constant_folding=True,
@@ -99,8 +183,21 @@ def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueN
         }
     )
 
-    print(f"Exported to {onnx_filename}, verifying...")
-    verify_export(base_model, onnx_filename)
+    print(f"Exported to a temporary file, verifying before writing {onnx_filename} ...")
+    try:
+        verify_export(base_model, tmp_filename)
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt or a SLURM timeout
+        # mid-verification must not leave the temp file behind either.
+        try:
+            os.remove(tmp_filename)
+            print(f"Verification failed -- removed {tmp_filename}, "
+                  f"{onnx_filename} was not written.")
+        except OSError:
+            pass
+        raise
+
+    os.replace(tmp_filename, onnx_filename)
 
     file_size = os.path.getsize(onnx_filename)
     with open(onnx_filename, "rb") as f:

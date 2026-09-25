@@ -330,8 +330,22 @@ lowers to a scatter-reduce that ONNX opset 14 cannot express as an average —
 the exporter silently falls back to *replace* semantics instead of averaging.
 At inference the agent always evaluates exactly one graph, so a plain per-node
 mean is equivalent and exports cleanly as `ReduceMean`. The script verifies the
-exported graph against the PyTorch model across a range of node counts and
-refuses to write a model whose outputs differ by more than 1e-5.
+exported graph against the PyTorch model across a range of node counts, and
+**writes to a temporary file, verifying before renaming into place** — a failed
+verification leaves no `.onnx` behind at all, rather than an unchecked one with
+no `SHA256SUMS` beside it.
+
+Agreement is judged on a combined tolerance, `|diff| <= 1e-5 + 1e-6 × |torch
+output|`, and both the absolute and the relative difference are printed per node
+count. A fixed absolute bound does not work here: the network emits a raw logit
+that reaches into the tens, and one correctly-rounded float32 bit at an output
+of 128 is already 1.5e-5. Two of the per-seed exports were rejected by the old
+fixed 1e-5 bound over differences of exactly 1 ULP, with relative errors of
+1.19e-7 — float32 epsilon. Those exports were correct; the tolerance was not.
+
+If verification ever does fail, read the **relative** column: ~1e-7 means the
+tolerance needs revisiting, while anything orders of magnitude larger means the
+graph is wrong, and the pooling operator is the first thing to check.
 
 It prints the output's size and SHA-256. Runtime: seconds.
 
