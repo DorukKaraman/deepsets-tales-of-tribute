@@ -343,6 +343,14 @@ of 128 is already 1.5e-5. Two of the per-seed exports were rejected by the old
 fixed 1e-5 bound over differences of exactly 1 ULP, with relative errors of
 1.19e-7 — float32 epsilon. Those exports were correct; the tolerance was not.
 
+The verification inputs are drawn from a fixed seed, so the check is
+deterministic: the same file gives the same verdict and the same printed numbers
+on every run, and a failure can be reproduced by whoever has to diagnose it.
+(Unseeded, it drew fresh inputs each run — which is why some per-seed exports
+tripped the old bound and others did not, on identical code.) The seeding uses a
+local `torch.Generator`, not `torch.manual_seed`, so importing this module
+cannot perturb anyone else's random stream.
+
 If verification ever does fail, read the **relative** column: ~1e-7 means the
 tolerance needs revisiting, while anything orders of magnitude larger means the
 graph is wrong, and the pooling operator is the first thing to check.

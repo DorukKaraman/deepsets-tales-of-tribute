@@ -68,10 +68,28 @@ class ONNXWrapper(torch.nn.Module):
 VERIFY_ATOL = 1e-5
 VERIFY_RTOL = 1e-6
 
+# Seed for the verification inputs. The particular value is arbitrary; that it
+# is FIXED is the point.
+#
+# Unseeded, this check drew fresh inputs on every run, so the same unchanged
+# file could pass or fail depending on when it happened to run. That is not a
+# verification. It is also the real reason seeds 0-2 passed the old 1e-5 bound
+# and seeds 3-4 failed it: identical code, identical tolerance, different random
+# draws landing on different output magnitudes. And when a check does fail,
+# whoever has to diagnose it needs to be able to reproduce the failing inputs
+# rather than watch them vanish on the next run.
+VERIFY_SEED = 12345
+
 
 def verify_export(base_model, onnx_filename):
     import onnxruntime as ort
     base_model.eval()
+
+    # A LOCAL generator, not torch.manual_seed: this module gets imported, and
+    # a verification helper that quietly reseeds the global RNG would perturb
+    # whatever else in the process is drawing from it.
+    gen = torch.Generator()
+    gen.manual_seed(VERIFY_SEED)
 
     # Single-threaded on purpose. This is a correctness check that runs one
     # small graph at a time, so a thread pool buys nothing; left to size itself,
@@ -88,8 +106,8 @@ def verify_export(base_model, onnx_filename):
     worst_rel = 0.0
     failures = []
     for n in [1, 2, 3, 5, 15, 16, 25, 40, 60]:
-        x = torch.randn(n, NODE_DIM, dtype=torch.float32)
-        u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
+        x = torch.randn(n, NODE_DIM, dtype=torch.float32, generator=gen)
+        u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32, generator=gen)
         with torch.no_grad():
             ref = base_model(
                 MockBatch(x, torch.zeros(n, dtype=torch.int64), u)
