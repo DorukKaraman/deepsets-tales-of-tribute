@@ -334,25 +334,42 @@ precisely that much — treat 16 GB as a lower bound, not a measurement. Seeds 1
 were given 24 GB and ran without incident. `scripts/slurm_train.sh` now defaults
 to 24 GB.
 
-**Two interventions, neither requiring retraining.** Seed 0's in-job export died
+**Three interventions, none requiring retraining.** Seed 0's in-job export died
 on the missing `onnx` package and was exported by hand afterwards; seeds 3 and 4
 were rejected by the old fixed export tolerance and were re-exported once that
-was fixed. Both causes are now fixed at the source — `onnx` is pinned in
-`scripts/setup_python_env.sh`, and the tolerance is relative as described in
-[Export to ONNX](#4-export-to-onnx) — so a rerun should need neither.
+was fixed; and later all five were re-exported again with denormal flushing,
+after the first `seed_benchmark` run turned out to have been measuring models
+that ran four times slower than the shipped one. All three causes are now fixed
+at the source — `onnx` is pinned in `scripts/setup_python_env.sh`, the tolerance
+is relative, and flushing is the export default, all described in [Export to
+ONNX](#4-export-to-onnx) — so a rerun should need none of them. The `.pth`
+checkpoints were never touched by any of this, which is why the validation
+losses below are still the losses of the weights that produced them.
 
 **Results.**
 
-| Seed | Best val loss | ONNX SHA-256 |
+| Seed | Best val loss | ONNX SHA-256 (flushed re-export — the current files) |
 |---|---|---|
-| 0 | 0.4385 | `22558ce2719dd0ed2832889b6c48450c756deafef2cdedecd115189ac89ea749` |
-| 1 | 0.4369 | `88a73e81e194e7b258597a7a043d5faf69125f5aed878aeeb82dea6e88df23a4` |
-| 2 | 0.4402 | `757bcee975fe3dadcb568bbe678a3a371004ee20b41b4fffbfe0598b522e0b16` |
-| 3 | 0.4329 | `1e5ad7165c5fb94656faf94073dd29409506d5098aff774a459a15d9586ef646` |
-| 4 | 0.4470 | `9cd893be9ffcdb0d7fb4429a7178d9319b920d281a874efda179b999c8ad4201` |
+| 0 | 0.4385 | `b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258` |
+| 1 | 0.4369 | `1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df` |
+| 2 | 0.4402 | `56eb9f9113439848420e70674b1b2c8771d1b217df883e79dcd3b3a074976d90` |
+| 3 | 0.4329 | `cb30b934961dbe37365faf7c6d22df5b3e98054c2f45fbaef1789de8edf32e00` |
+| 4 | 0.4470 | `b77c2a6442a0685024f239fedcbe1a00fe1ce32159da633a40cbe57dffb8db84` |
 
 Mean 0.4391, sd 0.005. Those hashes are what go into a config's
-`allowed_onnx_sha256` when a seed's model is benchmarked via `SOT_MODEL_PATH`.
+`allowed_onnx_sha256` when a seed's model is benchmarked via `SOT_MODEL_PATH`,
+and they are the ones
+[`experiments/configs/seed_benchmark.json`](experiments/configs/seed_benchmark.json)
+carries.
+
+**These are the post-flush hashes, and they superseded an earlier set.** The
+original exports (`22558ce2…`, `88a73e81…`, `757bcee9…`, `1e5ad716…`,
+`9cd893be…`) carried 14,000–19,000 subnormal weights each and ran roughly 15×
+slower; the first `seed_benchmark` run measured those and is invalid. The
+re-exports are the *same models* — `tools/compare_onnx_models.py` found zero
+output difference across 2000 real states per seed — just without the dead
+weights. Do not put the old hashes back into any config; `seed_benchmark.json`'s
+`_first_run_was_invalid` block has the full account.
 
 **These val losses are not comparable to the shipped model's 0.4034.** That
 figure was measured on a different validation set, so the gap between it and

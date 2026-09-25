@@ -1,7 +1,51 @@
 {
   "name": "seed_benchmark",
   "description": "NEEDS TWO PATH SUBSTITUTIONS BEFORE IT WILL RUN -- see _model_paths below. How much of the agent's win rate is the training seed? Six models, each as the pure-network agent against SakkirinaSolo over the same 400 games: the five per-seed models from scripts/slurm_train.sh, plus the shipped model as a sixth point on the same seed_base so it sits in the same distribution rather than beside it.",
-
+  "_first_run_was_invalid": [
+    "THE FIRST RUN OF THIS CONFIG IS INVALID. Its results are being kept under",
+    "experiment_results/calibration/, so someone will find them and they look fine. They are not.",
+    "",
+    "Job 4457064, 2400 games, all completed cleanly. The five seed rows produced win rates of",
+    "78.5, 75.5, 79.5, 78.0 and 68.0 percent -- an entirely plausible spread.",
+    "",
+    "WHY THEY ARE INVALID. Each seed model carried 14,000-19,000 subnormal weights, an artefact",
+    "of training on x86 rather than on Apple Silicon, which flushes denormals in hardware.",
+    "Subnormal arithmetic falls off onnxruntime's fast path, so the seed models ran at a median",
+    "640-790 us per inference against the shipped model's ~58 us, and completed roughly",
+    "1,350-1,510 evaluations per turn against the shipped row's 6,401. They were searching about",
+    "a QUARTER as much as the model they were being compared against, in an experiment whose",
+    "entire premise is that the six models differ only in training seed.",
+    "",
+    "NOTHING FAILED. Every game finished. No timeouts, no disqualifications, no errors, and win",
+    "rates that looked like ordinary seed variance. The only visible symptom anywhere was the",
+    "evaluations-per-turn column -- which exists only because equal_effort needed it, and which",
+    "nothing would have prompted anyone to read on a config about training seeds. Had the column",
+    "not been there, this would have gone into the paper.",
+    "",
+    "THE FIX. The five models were re-exported with denormal flushing (training/export_to_onnx.py",
+    "zeroes |w| < 1e-30 by default). They now run at 44-50 us, and tools/compare_onnx_models.py",
+    "confirms zero output difference across 2000 real states per seed -- same models, same",
+    "predictions, ~15x faster. allowed_onnx_sha256 and the per-matchup notes above carry the",
+    "re-exported hashes; the old ones are superseded and must not be re-added.",
+    "",
+    "THE SHIPPED ROW WAS UNAFFECTED. Tasks 2000-2399 ran the shipped model, which has no",
+    "subnormal weights, at 6,401 evaluations per turn. Those results are valid and were kept."
+  ],
+  "_check_before_interpreting": [
+    "BEFORE INTERPRETING THE RERUN, CHECK THE EVALUATIONS-PER-TURN COLUMN.",
+    "",
+    "  python tools/aggregate_benchmark_results.py --config seed_benchmark --out-dir $OUT_DIR",
+    "",
+    "Every seed row's mean evaluations per turn should land near the shipped row's ~6,400. If a",
+    "seed row comes back at ~1,400 instead, that row did NOT run the re-exported model -- most",
+    "likely SOT_MODEL_PATH still points at a pre-flush .onnx, or a stale copy was left in place.",
+    "",
+    "This check is not optional and it is not a formality. The first run failed in exactly this",
+    "way and produced clean, plausible, completely wrong numbers; the win rates alone will not",
+    "tell you which run you are looking at. The hash pin in allowed_onnx_sha256 now rejects the",
+    "old files outright, so a repeat should abort rather than mislead -- but verify the column",
+    "anyway, because the pin is a set check and cannot tell one allowed model from another."
+  ],
   "_model_paths": [
     "EVERY SOT_MODEL_PATH BELOW MUST BE EDITED BEFORE SUBMITTING. Two substitutions:",
     "  CHANGE_ME_HPCWORK   -> the literal expansion of $HPCWORK on your cluster",
@@ -29,7 +73,6 @@
     "that SOT_MODEL_PATH exists BEFORE launching the game and aborts the task with",
     "exit 1 and no result file if it does not. CHANGE_ME_* paths fail that check."
   ],
-
   "_what_the_pin_does_and_does_not_guarantee": [
     "allowed_onnx_sha256 lists all six hashes because the pin is checked per task",
     "against whatever that task's SOT_MODEL_PATH names. That is a SET check, so it",
@@ -44,7 +87,6 @@
     "records its task's full env, so which path each matchup actually used is",
     "recoverable from the results afterwards."
   ],
-
   "_comparability": [
     "WHY THE SHIPPED MODEL IS A MATCHUP HERE AND NOT A NUMBER COPIED IN.",
     "",
@@ -65,19 +107,17 @@
     "six readings of one set of positions. Read differences against the Wilson",
     "intervals the aggregator prints, not as a ranking."
   ],
-
   "seed_base": 20260928,
   "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
   "allowed_onnx_sha256": [
-    "22558ce2719dd0ed2832889b6c48450c756deafef2cdedecd115189ac89ea749",
-    "88a73e81e194e7b258597a7a043d5faf69125f5aed878aeeb82dea6e88df23a4",
-    "757bcee975fe3dadcb568bbe678a3a371004ee20b41b4fffbfe0598b522e0b16",
-    "1e5ad7165c5fb94656faf94073dd29409506d5098aff774a459a15d9586ef646",
-    "9cd893be9ffcdb0d7fb4429a7178d9319b920d281a874efda179b999c8ad4201",
+    "b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258",
+    "1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df",
+    "56eb9f9113439848420e70674b1b2c8771d1b217df883e79dcd3b3a074976d90",
+    "cb30b934961dbe37365faf7c6d22df5b3e98054c2f45fbaef1789de8edf32e00",
+    "b77c2a6442a0685024f239fedcbe1a00fe1ce32159da633a40cbe57dffb8db84",
     "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
   ],
   "bot_log": "parse",
-
   "defaults": {
     "games": 400,
     "timeout": 10,
@@ -86,48 +126,59 @@
       "SOT_TIME_SCALE": "1.0"
     }
   },
-
   "matchups": [
     {
       "label": "seed_00",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_00/DeepSetsValueNetwork_seed_00.onnx"},
-      "note": "best val loss 0.4385, sha256 22558ce2..."
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_00/DeepSetsValueNetwork_seed_00.onnx"
+      },
+      "note": "best val loss 0.4385, sha256 b5b8b2bf... (re-exported with denormal flushing -- see _first_run_was_invalid)"
     },
     {
       "label": "seed_01",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_01/DeepSetsValueNetwork_seed_01.onnx"},
-      "note": "best val loss 0.4369, sha256 88a73e81..."
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_01/DeepSetsValueNetwork_seed_01.onnx"
+      },
+      "note": "best val loss 0.4369, sha256 1efc662e... (re-exported with denormal flushing -- see _first_run_was_invalid)"
     },
     {
       "label": "seed_02",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_02/DeepSetsValueNetwork_seed_02.onnx"},
-      "note": "best val loss 0.4402, sha256 757bcee9..."
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_02/DeepSetsValueNetwork_seed_02.onnx"
+      },
+      "note": "best val loss 0.4402, sha256 56eb9f91... (re-exported with denormal flushing -- see _first_run_was_invalid)"
     },
     {
       "label": "seed_03",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_03/DeepSetsValueNetwork_seed_03.onnx"},
-      "note": "best val loss 0.4329 (lowest of the five), sha256 1e5ad716..."
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_03/DeepSetsValueNetwork_seed_03.onnx"
+      },
+      "note": "best val loss 0.4329 (lowest of the five), sha256 cb30b934... (re-exported with denormal flushing -- see _first_run_was_invalid)"
     },
     {
       "label": "seed_04",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_04/DeepSetsValueNetwork_seed_04.onnx"},
-      "note": "best val loss 0.4470 (highest of the five), sha256 9cd893be..."
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_04/DeepSetsValueNetwork_seed_04.onnx"
+      },
+      "note": "best val loss 0.4470 (highest of the five), sha256 b77c2a64... (re-exported with denormal flushing -- see _first_run_was_invalid)"
     },
     {
       "label": "shipped",
       "bot_a": "DeepSetsBotExp",
       "bot_b": "SakkirinaSolo",
-      "env": {"SOT_MODEL_PATH": "CHANGE_ME_REPO_ROOT/models/DeepSetsValueNetwork.onnx"},
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_REPO_ROOT/models/DeepSetsValueNetwork.onnx"
+      },
       "note": "The shipped model, on the same seed_base as the five seeds so it is a sixth point in the same distribution -- see _comparability. Its val loss is not in this table on purpose: 0.4034 was measured on a DIFFERENT validation set from the seeds' and is not comparable to theirs. Set explicitly rather than left unset so the plan and every result JSON record which model this row used; leaving it unset would resolve to GameRunner's own copy, which is the same file but says so nowhere. Last in the config, so it can be dropped by simply not submitting its task-id range without renumbering any seed row."
     }
   ]
