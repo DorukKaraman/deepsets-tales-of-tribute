@@ -10,6 +10,7 @@ the original hardcoded benchmark did.
 | [`time_scaling.json`](time_scaling.json) | Does the advantage grow, shrink or hold as the per-turn budget moves from 2 s to 30 s? | 5 × 400 | 2000 |
 | [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up; landed at 0.88 of the baseline's effort (43,139 vs 49,131 evals/turn). | 1 × 400 | 400 |
 | [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheaper; matched to within 3 % (6,433 vs 6,627 evals/turn). | 1 × 400 | 400 |
+| [`seed_benchmark.json`](seed_benchmark.json) | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. **Needs two path substitutions first.** | 6 × 400 | 2400 |
 | [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly. | 10 × 400 | 4000 |
 
 `legacy_paper_benchmark.json` is the previously-hardcoded list: same order, same

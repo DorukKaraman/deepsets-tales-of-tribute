@@ -1,0 +1,134 @@
+{
+  "name": "seed_benchmark",
+  "description": "NEEDS TWO PATH SUBSTITUTIONS BEFORE IT WILL RUN -- see _model_paths below. How much of the agent's win rate is the training seed? Six models, each as the pure-network agent against SakkirinaSolo over the same 400 games: the five per-seed models from scripts/slurm_train.sh, plus the shipped model as a sixth point on the same seed_base so it sits in the same distribution rather than beside it.",
+
+  "_model_paths": [
+    "EVERY SOT_MODEL_PATH BELOW MUST BE EDITED BEFORE SUBMITTING. Two substitutions:",
+    "  CHANGE_ME_HPCWORK   -> the literal expansion of $HPCWORK on your cluster",
+    "                         (echo $HPCWORK on the login node), e.g. /hpcwork/yfl79180",
+    "  CHANGE_ME_REPO_ROOT -> the absolute path of this checkout,",
+    "                         e.g. /home/you/tot/deepsets-tales-of-tribute",
+    "",
+    "THE PATHS MUST BE ABSOLUTE. Not a style preference -- a relative path is",
+    "resolved against two DIFFERENT working directories on the way to the bot:",
+    "  - tools/benchmark_cluster.py checks os.path.isfile(SOT_MODEL_PATH) from",
+    "    wherever the harness was invoked;",
+    "  - the game runs with cwd=GameRunner/bin/Release/net8.0, and the bot calls",
+    "    File.Exists on the same string from THERE.",
+    "So a relative path can satisfy the harness and still miss in the bot -- and a",
+    "miss in the bot is SILENT: DeepSetsBotExp logs the rejection and falls back to",
+    "its normal resolution, which finds GameRunner's own copy of the shipped model.",
+    "Every seed row would then quietly benchmark the shipped model instead.",
+    "",
+    "$HPCWORK IS NOT EXPANDED. Nothing between this file and the bot runs a shell:",
+    "the env dict is passed verbatim into the child process, so a literal",
+    "\"$HPCWORK/...\" stays a literal dollar sign and the file is simply not found.",
+    "Substitute the expanded path by hand.",
+    "",
+    "An unedited config cannot run by accident: tools/benchmark_cluster.py checks",
+    "that SOT_MODEL_PATH exists BEFORE launching the game and aborts the task with",
+    "exit 1 and no result file if it does not. CHANGE_ME_* paths fail that check."
+  ],
+
+  "_what_the_pin_does_and_does_not_guarantee": [
+    "allowed_onnx_sha256 lists all six hashes because the pin is checked per task",
+    "against whatever that task's SOT_MODEL_PATH names. That is a SET check, so it",
+    "guarantees 'this task loaded one of our six known models' -- it does NOT",
+    "guarantee 'seed 3's row loaded seed 3's model'. The harness has one allowed",
+    "list per config, not one per matchup.",
+    "",
+    "For most configs that distinction is irrelevant; here it is the whole point of",
+    "the experiment, so check identity separately before submitting:",
+    "  cd $HPCWORK/tot_models && sha256sum seed_*/DeepSetsValueNetwork_seed_*.onnx",
+    "and compare against the table in REPRODUCE.md section 3. Every result JSON also",
+    "records its task's full env, so which path each matchup actually used is",
+    "recoverable from the results afterwards."
+  ],
+
+  "_comparability": [
+    "WHY THE SHIPPED MODEL IS A MATCHUP HERE AND NOT A NUMBER COPIED IN.",
+    "",
+    "The shipped model's 79.3% against SakkirinaSolo came from alpha_sweep.json at",
+    "alpha0=0. That config has seed_base 20260922; this one has 20260928. Different",
+    "seed base means different games -- different deals, different opponents' draws,",
+    "a different sample. Dropping 79.3% into a table beside these five would be",
+    "comparing one model on one set of 400 games against five models on a different",
+    "set of 400 games, and the difference between the two sets is not zero.",
+    "",
+    "So the shipped model gets its own matchup in THIS config, on THIS seed_base,",
+    "playing the same 400 games as the seeds. Six models, one set of games,",
+    "like-for-like. The alpha_sweep figure stays where it is and is not reused here.",
+    "",
+    "Note the seeds' games are still not PAIRED with each other: seed = seed_base +",
+    "task_id and task ids run contiguously across matchups, so each matchup plays a",
+    "different 400 games. They are six independent samples from one population, not",
+    "six readings of one set of positions. Read differences against the Wilson",
+    "intervals the aggregator prints, not as a ranking."
+  ],
+
+  "seed_base": 20260928,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": [
+    "22558ce2719dd0ed2832889b6c48450c756deafef2cdedecd115189ac89ea749",
+    "88a73e81e194e7b258597a7a043d5faf69125f5aed878aeeb82dea6e88df23a4",
+    "757bcee975fe3dadcb568bbe678a3a371004ee20b41b4fffbfe0598b522e0b16",
+    "1e5ad7165c5fb94656faf94073dd29409506d5098aff774a459a15d9586ef646",
+    "9cd893be9ffcdb0d7fb4429a7178d9319b920d281a874efda179b999c8ad4201",
+    "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
+  ],
+  "bot_log": "parse",
+
+  "defaults": {
+    "games": 400,
+    "timeout": 10,
+    "env": {
+      "SOT_ALPHA0": "0.0",
+      "SOT_TIME_SCALE": "1.0"
+    }
+  },
+
+  "matchups": [
+    {
+      "label": "seed_00",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_00/DeepSetsValueNetwork_seed_00.onnx"},
+      "note": "best val loss 0.4385, sha256 22558ce2..."
+    },
+    {
+      "label": "seed_01",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_01/DeepSetsValueNetwork_seed_01.onnx"},
+      "note": "best val loss 0.4369, sha256 88a73e81..."
+    },
+    {
+      "label": "seed_02",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_02/DeepSetsValueNetwork_seed_02.onnx"},
+      "note": "best val loss 0.4402, sha256 757bcee9..."
+    },
+    {
+      "label": "seed_03",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_03/DeepSetsValueNetwork_seed_03.onnx"},
+      "note": "best val loss 0.4329 (lowest of the five), sha256 1e5ad716..."
+    },
+    {
+      "label": "seed_04",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_models/seed_04/DeepSetsValueNetwork_seed_04.onnx"},
+      "note": "best val loss 0.4470 (highest of the five), sha256 9cd893be..."
+    },
+    {
+      "label": "shipped",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {"SOT_MODEL_PATH": "CHANGE_ME_REPO_ROOT/models/DeepSetsValueNetwork.onnx"},
+      "note": "The shipped model, on the same seed_base as the five seeds so it is a sixth point in the same distribution -- see _comparability. Its val loss is not in this table on purpose: 0.4034 was measured on a DIFFERENT validation set from the seeds' and is not comparable to theirs. Set explicitly rather than left unset so the plan and every result JSON record which model this row used; leaving it unset would resolve to GameRunner's own copy, which is the same file but says so nowhere. Last in the config, so it can be dropped by simply not submitting its task-id range without renumbering any seed row."
+    }
+  ]
+}
