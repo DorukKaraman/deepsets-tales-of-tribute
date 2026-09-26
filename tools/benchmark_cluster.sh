@@ -210,9 +210,19 @@ if [ "$EXPECTED_BOTS_SHA" != "$ACTUAL_BOTS_SHA" ]; then
   exit 1
 fi
 
-# --- Pre-flight guard 2/2: onnx MANDATORY pin, against the config's allowed
-# list (see the header). There is no "unpinned" mode.
-ALLOWED_HASHES="$("$PYTHON_BIN" -c '
+# --- Pre-flight guard 2/2: the STALE-BUILD check. GameRunner ships its own
+# copy of the model, and this confirms that copy is the one the config expects.
+#
+# It is checked against "builtin_onnx_sha256", NOT against
+# "allowed_onnx_sha256", and the separation is the point. allowed_onnx_sha256
+# lists the models a ROW may load through SOT_MODEL_PATH; the built-in copy is
+# a different thing that happens to be a model too. Checking the built-in copy
+# against the allowed list forced every config to whitelist the shipped hash
+# even when no row should ever load it -- and once the shipped hash is on the
+# allowed list, a row that silently fell back to the built-in model passes the
+# pin. For a control row running the same architecture at the same speed,
+# nothing else would have caught it.
+BUILTIN_HASH="$("$PYTHON_BIN" -c '
 import json, sys, os
 sys.path.insert(0, sys.argv[1])
 import benchmark_cluster as bc
@@ -221,16 +231,13 @@ try:
 except Exception as e:
     print("CONFIG_ERROR " + str(e).replace("\n", " "))
     sys.exit(0)
-print(" ".join(cfg["allowed_onnx_sha256"]))
+print(cfg["builtin_onnx_sha256"])
 ' "$SCRIPT_DIR" "$CONFIG")"
 
-if [[ "$ALLOWED_HASHES" == CONFIG_ERROR* ]]; then
-  echo "ERROR: could not read the experiment config: ${ALLOWED_HASHES#CONFIG_ERROR }" >&2
+if [[ "$BUILTIN_HASH" == CONFIG_ERROR* ]]; then
+  echo "ERROR: could not read the experiment config: ${BUILTIN_HASH#CONFIG_ERROR }" >&2
   exit 1
 fi
-for h in ${EXTRA_HASHES+"${EXTRA_HASHES[@]}"}; do
-  ALLOWED_HASHES="$ALLOWED_HASHES $h"
-done
 
 ONNX_DST="$RUNNER_OUT_DIR/DeepSetsValueNetwork.onnx"
 if [ ! -f "$ONNX_DST" ]; then
@@ -239,21 +246,19 @@ if [ ! -f "$ONNX_DST" ]; then
 fi
 ONNX_DST_SHA="$(shasum -a 256 "$ONNX_DST" | awk '{print $1}')"
 
-ONNX_OK=0
-for h in $ALLOWED_HASHES; do
-  if [ "$ONNX_DST_SHA" = "$h" ]; then ONNX_OK=1; break; fi
-done
-if [ "$ONNX_OK" != "1" ]; then
-  echo "ERROR: onnx model sha256 is not in the config's allowed list -- ABORTING before running." >&2
+if [ "$ONNX_DST_SHA" != "$BUILTIN_HASH" ]; then
+  echo "ERROR: GameRunner's built-in onnx model is not the one this config expects" >&2
+  echo "       -- ABORTING before running." >&2
   echo "  file    : $ONNX_DST" >&2
   echo "  actual  : $ONNX_DST_SHA" >&2
-  echo "  allowed : $ALLOWED_HASHES" >&2
-  echo "  A bot whose model fails a load check like this one still plays --" >&2
-  echo "  it just silently falls back to a heuristic evaluator, which would" >&2
-  echo "  produce a full set of plausible-looking wrong numbers with nothing" >&2
-  echo "  flagging it. That is why this is not skippable." >&2
-  echo "  (If a per-seed model is meant to be used here, add its hash to the" >&2
-  echo "   config's allowed_onnx_sha256, or pass --allow-onnx-sha256.)" >&2
+  echo "  expected: $BUILTIN_HASH  (config's builtin_onnx_sha256)" >&2
+  echo "  This is the stale-build check: it says the binary you are about to" >&2
+  echo "  run was built against a different model than the config was written" >&2
+  echo "  for. Rebuild, or set builtin_onnx_sha256 in the config if the change" >&2
+  echo "  is deliberate." >&2
+  echo "  It is NOT the row pin. Models a matchup loads via SOT_MODEL_PATH go" >&2
+  echo "  in allowed_onnx_sha256 (or --allow-onnx-sha256), and are additionally" >&2
+  echo "  verified per game against what the bot logs having loaded." >&2
   exit 1
 fi
 

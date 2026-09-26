@@ -89,14 +89,38 @@ the log. That makes equal-effort matching measurable from any run, not just a
 dedicated one -- and --calibrate below is just this, run over a handful of
 games with nothing else going on.
 
-ONNX PIN: MANDATORY and not skippable. A bot that fails to load its model does
-not crash or refuse to play -- it silently falls back to a heuristic evaluator,
-so a 2000-game run against the wrong model produces a full set of
-plausible-looking numbers for the wrong experiment. The pin now takes a LIST of
-allowed hashes because per-seed training (scripts/slurm_train.sh) produces
-several legitimate models. tools/benchmark_cluster.sh checks GameRunner's own
-model copy against the list; this script additionally checks any SOT_MODEL_PATH
-a matchup sets, which is the only place that check can happen at all.
+ONNX PIN: MANDATORY and not skippable, in three separate layers. A bot that
+fails to load its model does not crash or refuse to play -- it silently falls
+back to a heuristic evaluator, so a 2000-game run against the wrong model
+produces a full set of plausible-looking numbers for the wrong experiment.
+
+  1. STALE BUILD. tools/benchmark_cluster.sh checks GameRunner's own copy of
+     the model against the config's "builtin_onnx_sha256" (default: the
+     shipped model). This asks "was the binary built against the model this
+     config was written for".
+
+  2. ROW PIN, before the game. check_task_model() hashes whatever file a
+     matchup's SOT_MODEL_PATH names and requires it to be in the config's
+     "allowed_onnx_sha256". A LIST, because per-seed training
+     (scripts/slurm_train.sh) produces several legitimate models.
+
+  3. WHAT WAS ACTUALLY LOADED, after the game. verify_loaded_models() reads
+     back the sha256 each bot logged in PregamePrepare and requires it to
+     match that row's own expected model. No line, or the wrong hash, fails
+     the task and writes no result.
+
+Layers 1 and 2 are deliberately separate lists. They were one list, and that
+was wrong in a way worth recording: the built-in copy was checked against
+allowed_onnx_sha256, so every config had to whitelist the shipped hash even
+when no row should ever load it -- and a whitelisted shipped hash means a row
+that silently fell back to the built-in model passes the pin. For a control row
+running the same architecture at the same speed, no other signal would have
+caught it.
+
+Layer 3 is what makes the guarantee per-row. Layers 1 and 2 are set checks on
+files; they can confirm a task pointed at one of the config's known models, but
+never that seed 3's row ran seed 3's model. Only the bot knows that, and it
+says so in its log.
 
 RESUMABILITY: a task's result file (see result_path()) is written ONLY after a
 game completes and its stats are parsed successfully -- never before, never on
@@ -161,6 +185,29 @@ GAME_END_REASON_PATTERN = re.compile(r"^GAME_END_REASON:\s*(\w+)\s+WINNER:\s*(\w
 # SakkirinaScaled (scripts/sakkirina_scaled.patch), via BotLog.
 EVALS_PER_TURN_PATTERN = re.compile(
     r"(\w+)\.EvalsPerTurn:\s*totalEvalCalls=(\d+),\s*turns=(\d+),\s*meanEvalsPerTurn=([0-9.]+)")
+
+# Emitted once per game in PregamePrepare by every bot that loads an ONNX
+# model, naming the file it actually resolved and hashing it. This is the only
+# statement of what a game really ran; everything else is inference from
+# configuration.
+LOADED_MODEL_PATTERN = re.compile(
+    r"(\w+)\.PregamePrepare:\s*ONNX model loaded OK from '([^']*)',\s*"
+    r"size=(\d+) bytes,\s*sha256=([0-9a-fA-F]{64})")
+
+# Bots that load an ONNX model and log the line above. A bot here MUST produce
+# that line or its task fails -- silence means either that the load failed (the
+# bot logs FAILED and falls back to a heuristic, still playing a full game) or
+# that the log never reached us, and neither is a result worth keeping.
+MODEL_LOADING_BOTS = {
+    "DeepSetsBot", "DeepSetsBlendBot",
+    "DeepSetsBotTrim", "DeepSetsBlendBotTrim",
+    "DeepSetsBotExp",
+}
+
+# Of those, the ones that honour SOT_MODEL_PATH. The rest always load
+# GameRunner's own copy, so their expected hash is builtin_onnx_sha256 even in
+# a matchup where the other side is pointed somewhere else.
+SOT_MODEL_PATH_BOTS = {"DeepSetsBotExp"}
 
 # Exhaustive over ScriptsOfTribute.Board.GameEndReason. A reason that is not
 # here is classified "unknown" rather than quietly folded into one of these --
@@ -333,18 +380,44 @@ def load_config(path, seed_base_override=None):
     if isinstance(allowed, str):
         allowed = [allowed]
 
-    return {
+    builtin = (raw.get("builtin_onnx_sha256") or SHIPPED_ONNX_SHA256).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", builtin):
+        raise ConfigError(
+            f"{path}: 'builtin_onnx_sha256' must be a 64-character hex sha256, got {builtin!r}.")
+
+    config = {
         "path": path,
         "name": raw.get("name") or os.path.splitext(os.path.basename(path))[0],
         "description": raw.get("description", ""),
         "seed_base": int(seed_base),
         "patrons": raw.get("patrons", DEFAULT_PATRONS),
         "allowed_onnx_sha256": [h.strip().lower() for h in allowed],
+        "builtin_onnx_sha256": builtin,
         "bot_log": raw.get("bot_log", "parse"),
         "matchups": matchups,
         "calibration_matchups": calib_matchups,
         "total_tasks": offset,
     }
+
+    # A matchup that overrides SOT_MODEL_PATH is exactly the case the per-task
+    # loaded-model check exists for, and that check reads the bot log. Refuse
+    # the combination rather than skipping the check silently: an override that
+    # fails to load falls back to GameRunner's built-in model and plays on, and
+    # with the log off nothing downstream can tell.
+    if config["bot_log"] not in ("parse", "keep"):
+        overriding = [m["label"] for m in matchups
+                      if m["env"].get("SOT_MODEL_PATH")]
+        if overriding:
+            raise ConfigError(
+                f"{path}: bot_log is {config['bot_log']!r}, but these matchups set "
+                f"SOT_MODEL_PATH: {', '.join(overriding)}.\n"
+                f"  The harness verifies what each game actually loaded by reading the "
+                f"bot log, and cannot do that with the log off.\n"
+                f"  A model override that fails to load is SILENT -- the bot falls back "
+                f"to GameRunner's built-in copy and plays a full, plausible-looking game "
+                f"against the wrong model.\n"
+                f"  Set \"bot_log\": \"parse\".")
+    return config
 
 
 # --------------------------------------------------------------------------
@@ -486,6 +559,87 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def parse_loaded_models(bot_log_path):
+    """bot name -> {"path", "size", "sha256"} for every bot that logged a
+    successful model load. Last line wins if a bot somehow logged twice."""
+    loaded = {}
+    if not bot_log_path or not os.path.isfile(bot_log_path):
+        return loaded
+    try:
+        with open(bot_log_path, errors="replace") as f:
+            for line in f:
+                m = LOADED_MODEL_PATTERN.search(line)
+                if m:
+                    loaded[m.group(1)] = {
+                        "path": m.group(2),
+                        "size": int(m.group(3)),
+                        "sha256": m.group(4).lower(),
+                    }
+    except OSError:
+        pass
+    return loaded
+
+
+def expected_model_sha(task, config, bot):
+    """Which model SHOULD this bot have loaded in this task?
+
+    Only the bots in SOT_MODEL_PATH_BOTS read the override; everything else
+    loads GameRunner's built-in copy regardless of what the matchup sets. That
+    distinction matters in a mixed matchup, where pinning both sides to the
+    override's hash would fail a game that behaved perfectly correctly.
+
+    Returns (sha256, source_description) or (None, None) if the bot loads no
+    model.
+    """
+    if bot not in MODEL_LOADING_BOTS:
+        return None, None
+    override = task["env"].get("SOT_MODEL_PATH")
+    if bot in SOT_MODEL_PATH_BOTS and override:
+        if not os.path.isfile(override):
+            return None, None      # check_task_model already aborted the task
+        return sha256_file(override), f"SOT_MODEL_PATH ({override})"
+    return config["builtin_onnx_sha256"], "GameRunner's built-in model"
+
+
+def verify_loaded_models(task, config, loaded):
+    """Did every model-loading bot in this matchup load the model it was
+    supposed to? Returns an error string, or None.
+
+    THIS IS THE CHECK THAT MAKES THE PIN PER-ROW. allowed_onnx_sha256 is a SET
+    check on a file before the game: it can confirm that a task pointed at one
+    of the config's known models, never that seed 3's row actually ran seed 3's
+    model. A model that fails to load is silent -- the bot logs the failure and
+    plays the whole game on its heuristic fallback -- so without reading back
+    what was loaded, a row that quietly fell back to GameRunner's built-in copy
+    is indistinguishable from one that worked.
+    """
+    if config["bot_log"] not in ("parse", "keep"):
+        return None
+
+    problems = []
+    for bot in (task["bot_a"], task["bot_b"]):
+        want, source = expected_model_sha(task, config, bot)
+        if want is None:
+            continue
+        got = loaded.get(bot)
+        if got is None:
+            problems.append(
+                f"{bot} logged no successful model load.\n"
+                f"    Expected {want[:12]}... from {source}.\n"
+                f"    The bot logs 'FAILED to load ONNX model' and falls back to its "
+                f"heuristic evaluator rather than crashing, so a missing line here is "
+                f"a game played by the wrong evaluator -- not a missing log.")
+        elif got["sha256"] != want:
+            problems.append(
+                f"{bot} loaded the WRONG model.\n"
+                f"    expected: {want}  ({source})\n"
+                f"    loaded  : {got['sha256']}\n"
+                f"    from    : {got['path']}")
+    if not problems:
+        return None
+    return ("loaded-model verification failed:\n  - " + "\n  - ".join(problems))
+
+
 def check_task_model(task, allowed_hashes):
     """SOT_MODEL_PATH points a bot at a model other than GameRunner's own copy,
     which tools/benchmark_cluster.sh already verified. This is the only place
@@ -617,11 +771,24 @@ def run_task(binary, task, out_dir, config, proc_timeout_s):
                     "turn_limit": "turn_limit"}.get(end_reason, "unknown")
 
     evals_per_turn, ambiguous = parse_evals_per_turn(bot_log_path)
-    if bot_log_path and config["bot_log"] == "parse":
+    loaded_models = parse_loaded_models(bot_log_path)
+    load_err = verify_loaded_models(task, config, loaded_models)
+
+    # The log is the evidence for the failure, so keep it when the check fails
+    # even under bot_log=parse. On success it is deleted as before -- one file
+    # per game across 2,400 games is not worth keeping for its own sake.
+    if bot_log_path and config["bot_log"] == "parse" and load_err is None:
         try:
             os.remove(bot_log_path)
         except OSError:
             pass
+
+    if load_err:
+        return False, (f"ABORTED after running -- {load_err}\n"
+                       f"  No result written. The game itself completed; it was played "
+                       f"against the wrong evaluator, which is worse than not having run "
+                       f"it.\n"
+                       f"  Bot log kept at {bot_log_path}"), None
 
     result = {
         "task_id": task["task_id"],
@@ -647,6 +814,11 @@ def run_task(binary, task, out_dir, config, proc_timeout_s):
         "offender": resolve_offender(winner) if category in ("timeout", "disqualification") else None,
         "evals_per_turn": evals_per_turn,
         "evals_per_turn_ambiguous": ambiguous,
+        # What each bot ACTUALLY loaded, read back from its own log rather than
+        # inferred from the config. Recorded so a finished run can be audited
+        # per row after the fact, without re-reading bot logs that parse mode
+        # has already deleted.
+        "loaded_models": loaded_models,
         "wall_clock_s": round(wall_clock_s, 1),
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
     }
@@ -668,7 +840,15 @@ def print_config_header(config):
     print(f"Seed base      : {config['seed_base']}  (seed = seed_base + task_id)")
     print(f"Patrons        : {config['patrons']}")
     print(f"Bot log        : {config['bot_log']}")
-    print(f"Allowed onnx   : {', '.join(h[:12] + '...' for h in config['allowed_onnx_sha256'])}")
+    print(f"Allowed onnx   : {', '.join(h[:12] + '...' for h in config['allowed_onnx_sha256'])}"
+          f"   (models a row may load via SOT_MODEL_PATH)")
+    print(f"Built-in onnx  : {config['builtin_onnx_sha256'][:12]}..."
+          f"   (GameRunner's own copy; checked separately)")
+    if config["bot_log"] in ("parse", "keep"):
+        print("Loaded-model   : verified per task against each row's own expected hash")
+    else:
+        print(f"Loaded-model   : NOT verified (bot_log={config['bot_log']!r}); no row "
+              f"overrides SOT_MODEL_PATH, so every bot loads the built-in copy above")
 
 
 def print_task_plan(config, task):

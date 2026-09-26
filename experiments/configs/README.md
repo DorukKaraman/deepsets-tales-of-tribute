@@ -26,7 +26,8 @@ old harness resumes across the config rework. Do not reorder or extend it.
   "description": "printed in the plan and in the aggregate",
   "seed_base": 20260922,               // seed = seed_base + task_id; --seed-base overrides
   "patrons": "ANSEI,DUKE_OF_CROWS,...",
-  "allowed_onnx_sha256": ["86e0..."],  // replaces the default list wholesale
+  "allowed_onnx_sha256": ["86e0..."],  // models a ROW may load via SOT_MODEL_PATH
+  "builtin_onnx_sha256": "86e0...",    // GameRunner's own copy; defaults to the shipped model
   "bot_log": "parse",                  // parse | keep | off
   "defaults": { "games": 400, "timeout": 10, "env": {} },
   "matchups": [
@@ -66,13 +67,41 @@ those are how the value gets filled in. Both `equal_effort*.json` configs were
 built this way and are now filled in; nothing currently ships with a
 placeholder.
 
-**The ONNX pin takes a list.** Per-seed training (`scripts/slurm_train.sh`)
-means there is no longer exactly one legitimate model file. `tools/benchmark_cluster.sh`
-checks GameRunner's own model copy against `allowed_onnx_sha256`;
-`tools/benchmark_cluster.py` additionally checks any `SOT_MODEL_PATH` a matchup
-sets, which is the only place that override *can* be checked. Neither is
-skippable: a bot whose model fails to load does not crash, it silently falls
-back to a heuristic evaluator.
+**The ONNX pin has three layers, and the guarantee is per row.** A bot whose
+model fails to load does not crash — it logs the failure, falls back, and plays
+a complete, plausible-looking game against the wrong evaluator. None of these
+is skippable.
+
+| layer | what it checks | where |
+|---|---|---|
+| `builtin_onnx_sha256` | GameRunner's own copy of the model — a **stale-build** check | `benchmark_cluster.sh`, before anything runs |
+| `allowed_onnx_sha256` | the file a row's `SOT_MODEL_PATH` names is one the config knows | `benchmark_cluster.py`, before each game |
+| loaded-model check | the sha256 the bot **logged having loaded** equals that row's own expected model | `benchmark_cluster.py`, after each game |
+
+`allowed_onnx_sha256` takes a list because per-seed training
+(`scripts/slurm_train.sh`) means there is no longer exactly one legitimate
+model file.
+
+**The first two are separate fields on purpose.** They used to be one: the
+built-in copy was checked against `allowed_onnx_sha256`, which forced every
+config to whitelist the shipped hash even when no row should ever load it — and
+a whitelisted shipped hash means a row that silently fell back to the built-in
+model *passes the pin*. For a control row running the same architecture at the
+same speed, nothing else would have caught it.
+
+**The third is what makes it per row.** The first two are set checks on files:
+they can confirm a task pointed at one of the config's known models, never that
+seed 3's row ran seed 3's model. Only the bot knows that, and it says so in its
+log. A mismatch, or no such line at all, fails the task and writes no result;
+the bot log is kept for diagnosis instead of being deleted. Each result JSON
+records a `loaded_models` block — path, size and sha256 per bot — so a finished
+run is auditable row by row.
+
+Because that check reads the bot log, a config that sets `SOT_MODEL_PATH`
+anywhere **must** have `bot_log` set to `parse` or `keep`; the loader refuses
+the combination rather than skipping the check quietly. A config with no
+overrides at all (`legacy_paper_benchmark.json`) may still run with the log
+off, since every bot then loads the built-in copy that layer 1 already pinned.
 
 ## Running one
 
