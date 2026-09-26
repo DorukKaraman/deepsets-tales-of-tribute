@@ -1070,12 +1070,223 @@ scored on byte-identical samples. The forward pass it uses is the *exported*
 one (plain per-node mean rather than `global_mean_pool`), i.e. the path the
 agent actually runs.
 
+## 9. Flat-MLP ablation
+
+Does the DeepSets *structure* contribute, or do the 99-dim card features carry
+the result on their own? The ablation replaces the set encoder with a plain MLP
+over the same cards laid out as one fixed-size padded vector, changing the
+architecture and nothing about the features.
+
+```bash
+python training/train_flat.py --arch matched \
+    --train-dir "$SPLIT/train" --val-dir "$SPLIT/val" \
+    --epochs 3 --batch-size 256 --lr 5e-4 --seed 0 --out-dir "$OUT/flat_matched"
+python training/train_flat.py --arch wide   ... --out-dir "$OUT/flat_wide"
+
+python tools/verify_flat_parity.py --data-dir "$SPLIT/val" --num-samples 300
+( cd training && python export_flat_to_onnx.py \
+      --checkpoint "$OUT/flat_matched/best_model.pth" \
+      --out "$OUT/FlatValueNetwork_matched.onnx" --arch matched )
+```
+
+`train_flat.py` takes the same arguments as `train_local.py` and writes the same
+artefacts, because it *is* `train_local.py` — `train_model` grew a
+`model_factory` parameter rather than being forked, so both arms share one
+optimizer, scheduler, metric and checkpointing path and differ only in the
+model.
+
+### Two configurations, because one would not settle it
+
+| config | shape | parameters | vs DeepSets |
+|---|---|---|---|
+| DeepSets | 99→128→128 pooled, 256→128→64→1 | 73,089 | 1.00× |
+| `--arch matched` | 12,691→5→128→64→1 | 72,549 | 0.99× |
+| `--arch wide` | 12,691→128→128→64→1 | 1,649,409 | 22.57× |
+
+At a 12,691-dim input the first layer costs 12,691 weights per unit, so a
+73k budget caps it at `73,089 / 12,692 = 5.75` units *even if the rest of the
+network were free*. Five is what fits. That is a severe bottleneck, and beating
+a model that starved would prove little — hence `wide`, which pays the capacity
+off and asks the structural question separately.
+
+Choosing a smaller `MAX_NODES` does not rescue it: the ceiling is 7 units at 96
+nodes, 11 at 60, 12 at 48. There is no cap at which a parameter-matched flat
+model over this input is not a single-digit bottleneck. The narrowness is the
+cost of having no shared per-card encoder, which is the thing under test.
+
+### Why MAX_NODES is 128 and nothing is truncated
+
+The node count was measured over all 3,116,065 states of both generation runs:
+
+| | min | median | mean | p90 | p95 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|---|---|
+| pooled | 25 | 33 | 34.3 | 44 | 49 | 61 | 77 | **128** |
+| heuristic | 25 | 34 | 35.3 | 45 | 50 | 61 | 75 | 96 |
+| neural | 25 | 31 | 33.2 | 44 | 49 | 60 | 79 | 128 |
+
+A smaller cap looks nearly free — 96 truncates 0.011% of states, 60 truncates
+1.01% — and it is not. Truncation drops nodes from the end of
+`json_to_pyg_graph`'s emission order, which is `ENEMY_UNSEEN` (enemy hand and
+draw): the largest single contributor at 10.2 nodes per state and 30% of all
+nodes, removed *only* in the states that have the most of it. That is not 1% of
+states mildly degraded, it is 1% of states with a systematically chosen part of
+their input deleted — input the DeepSets model does see. Any accuracy gap could
+then be blamed on missing information rather than missing structure, and the
+ablation would answer a different question than the one asked.
+
+**The maximum of 128 is one game.** The tail above 96 is flat at 7–9 states per
+value all the way up, which is a trajectory rather than a distribution: game
+`298494_0_100`, a 1,071-state runaway that contributed 499 of the corpus's 936
+states above 85 nodes. Of the 380 games in the shards containing it, 377 never
+exceed 86. A fixed-size encoding must budget for that one game and then carry
+the empty space through every ordinary state.
+
+**Padding waste is a property of the data, not only a problem for this
+baseline.** At `MAX_NODES = 128` the median 33-node state leaves about 74% of
+the input vector as structural zeros; the mean leaves 73%, and even the 99th
+percentile at 61 nodes leaves 52%. The set encoder never allocates that space.
+That is an argument for the architecture, not an artefact of how the baseline
+was built.
+
+### Accuracy
+
+Subset run: 760 games split game-aware 90/10 into 175,739 train / 20,138 val
+states, three epochs, `--seed 0`, all three arms on the identical split. The
+DeepSets row is a **control trained here**, not the shipped model — 0.4034 was
+measured on a different validation set and is not comparable. All three were
+scored in one pass by `tools/evaluate_checkpoints.py`, so the samples are
+byte-identical across models.
+
+| model | loss | acc | AUC | Brier |
+|---|---|---|---|---|
+| DeepSets control | **0.5016** | **75.57%** | **0.8411** | **0.1655** |
+| flat-matched | 0.5556 | 73.17% | 0.8072 | 0.1821 |
+| flat-wide | 0.5687 | 73.29% | 0.8115 | 0.1847 |
+| majority baseline | — | 50.28% | — | — |
+
+**Test the clustered numbers, not the sample-level ones.** Val holds 20,138
+states across 76 games, ~265 states per game, and states within a game are
+highly correlated. A sample-level McNemar treats them as independent and returns
+p = 2×10⁻¹⁴ for the accuracy difference; the same difference clustered by game
+returns p = 0.086. The sample-level figure is wrong by twelve orders of
+magnitude and is reported here only to show how far off it is.
+
+| comparison | Δ accuracy | clustered t(75) | Δ loss | clustered t(75) |
+|---|---|---|---|---|
+| DeepSets − flat-matched | +2.40 pts | t = +1.74, p = 0.086 | −0.0553 | **t = −2.77, p = 0.0071** |
+| DeepSets − flat-wide | +2.28 pts | t = +1.33, p = 0.189 | −0.0564 | **t = −2.73, p = 0.0080** |
+| flat-wide − flat-matched | +0.12 pts | t = +0.75, p = 0.454 | +0.0010 | t = +0.12, p = 0.902 |
+
+So: **significant on loss, suggestive on accuracy.** Loss is continuous rather
+than thresholded, carries more information per sample, and is the metric
+`best_model.pth` is selected on; p = 0.0071 survives Bonferroni across the three
+comparisons (0.021). Accuracy at p = 0.086 is a consistent direction — DeepSets
+is better in 52 of 76 games — not a demonstrated difference.
+
+**Capacity is not what the flat model lacks.** 22.57× the parameters moves
+accuracy by +0.12 points (p = 0.45) and loss by +0.001 (p = 0.90), in the wrong
+direction on loss. `wide` also overfits hard, val loss 0.5693 → 0.7509 → 1.0097
+across three epochs while train accuracy climbs. The objection that the matched
+model was starved into losing does not survive this row, which is the only
+reason it was run.
+
+**The gap is an early-game gap.**
+
+| prestige bucket | n | DeepSets | flat-matched | gap |
+|---|---|---|---|---|
+| [0.00, 0.25) | 9,207 | 67.83% | 63.88% | **+3.95** |
+| [0.25, 0.50) | 3,953 | 74.48% | 73.13% | +1.35 |
+| [0.50, 0.75) | 3,171 | 84.42% | 82.97% | +1.45 |
+| [0.75, inf) | 3,807 | 88.07% | 87.52% | +0.55 |
+
+Late states are nearly decided and the prestige clock alone carries most of the
+signal, so architecture barely matters there. Early, where board composition is
+what separates positions, the set encoder pays.
+
+### Throughput
+
+`tools/compare_onnx_models.py`, 5,000 real states, single-threaded. It needs no
+changes for these models: `export_flat_to_onnx.py` gives the exported graph the
+same `(node_features, global_features)` inputs the DeepSets model takes and does
+the padding *inside* the graph, so the padding cost is inside the measurement
+where a real agent would pay it.
+
+| model | mean µs | median µs | vs DeepSets |
+|---|---|---|---|
+| DeepSets | 74.9 | 70.7 | — |
+| flat-matched | 51.9 | 49.7 | **1.45× faster** |
+| flat-wide | 197.0 | 195.6 | **2.47× slower** |
+
+**The MAC count predicted 14× and delivered 1.45×.** DeepSets runs its node
+encoder once per card — about 1,002,000 MACs at the median 33-node state —
+against the flat model's constant ~72,000. That arithmetic was a hypothesis
+about throughput and it over-predicted by an order of magnitude, because a
+12,691→5 matvec streams 63,455 weights to produce five numbers and is entirely
+memory-bound, while 33 batched 99→128 rows is a shape onnxruntime is good at.
+Arithmetic intensity decides this, not arithmetic. `wide` loses outright: 6.6 MB
+of weights is past useful cache residency.
+
+These are Apple Silicon numbers (M1, x86_64 Python under Rosetta). The denormal
+caveat in [section 4](#denormal-flushing-and-why-the-export-is-platform-dependent)
+does not apply — none of these models carry subnormal weights — but GEMM-shape
+efficiency is host-specific, so re-measure on the cluster before quoting a ratio.
+
+### What is not built, and what would settle it
+
+No C# encoder and no bot. Neither is needed yet, and a flat bot may need no C#
+encoder at all: the graph pads internally, so an agent could feed it through the
+unchanged `FeatureExtractor` in `DeepSetsCore.cs`.
+
+The open question is the subset. 175,739 training states is ~6% of the corpus,
+the control was **still improving at epoch 3** while both flat models peaked at
+epoch 1, and three epochs may therefore understate DeepSets specifically. A
+full-corpus run on the cluster is what would turn the accuracy result from
+p = 0.086 into an answer.
+
 ## Known limitations
 
 - **The tournament games cannot be reproduced here.** See
   [Which numbers come from where](#which-numbers-come-from-where).
 - **The shipped model's training metrics and wall-clock cost were not
   recorded.** Only the checkpoint and the exported ONNX survive from that run.
+- **`training/stream_dataset.py` does not partition shards across DataLoader
+  workers, so every `--num-workers > 0` run reads a random sub-multiset of the
+  data.** Each worker shuffles the shard list with *its own* RNG state and then
+  takes `shards[worker_id::num_workers]` — slices of different permutations,
+  which is not a partition. Measured on an 8-shard validation directory: at two
+  workers, three shards were read twice and three were never read (18,667
+  records streamed where the directory holds 20,138); at four workers, one shard
+  was read three times and three were never read (17,515 records).
+
+  This is **not fixed**, because it affects the pipeline that produced the
+  shipped model and all five seed models, and what to re-run is a judgement
+  call. The fix is to partition before shuffling rather than after:
+
+  ```python
+  worker_shards = self.shards[worker_id::num_workers]   # deterministic partition
+  random.shuffle(worker_shards)                         # per-worker order only
+  ```
+
+  Two consequences for numbers already in this file. **Every `best_val_loss` in
+  a `run_config.json` was computed on a resampled validation multiset**, drawn
+  differently per run, so the five seed models' 0.4385 / 0.4369 / 0.4402 /
+  0.4329 / 0.4470 mix model variance with sampling variance — which bears on
+  calling seed 3 the best and seed 4 the worst in
+  [section 3](#several-seeds-on-the-cluster). Re-scoring the six checkpoints
+  with `tools/evaluate_checkpoints.py` would settle that without retraining
+  anything, since that tool streams single-process and is unaffected. And
+  **training saw a different subsample each epoch**, missing a substantial
+  fraction of shards at the cluster's `--num-workers 7`.
+
+  The effect is not small. The flat-MLP ablation in
+  [section 9](#9-flat-mlp-ablation) was first run at `--num-workers 4` and had
+  to be discarded: the three arms drew *different* shard multisets, because the
+  DataLoader seeds its workers from the main-process RNG after model
+  construction and the three architectures consume different amounts of it. That
+  run put the DeepSets-vs-flat loss gap at 0.103; the clean `--num-workers 0`
+  re-run puts it at 0.054. The bug had inflated the apparent advantage roughly
+  twofold, in the direction that would have flattered the paper's own
+  architecture.
 - **Byte-identical ONNX export requires PyTorch 2.2.2.** The model itself
   reproduces exactly on any version; only the file hash does not.
 - **Training data is not distributed** (several GB) and regenerates only

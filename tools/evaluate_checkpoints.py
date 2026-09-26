@@ -24,6 +24,15 @@ byte-identical samples in identical order, which is the entire point of a
 common evaluation set. Memory stays bounded by --batch-size, so a
 multi-gigabyte directory does not have to fit in RAM.
 
+BOTH ARCHITECTURES, ONE TABLE. DeepSets checkpoints (training/ValueNetwork.py)
+and flat-MLP ablation checkpoints (training/ValueNetworkFlat.py) can be passed
+in the same invocation; the architecture is detected from the checkpoint's own
+keys, not from a flag, so the two cannot be scored through each other's forward
+pass by mistake. Mixing them is the intended use: the ablation's question is
+whether the set structure contributes, and the only honest way to ask it is to
+score both on byte-identical samples rather than to compare two separate
+validation passes.
+
 THE FORWARD PASS HERE IS THE EXPORTED ONE, not TributeValueNetwork.forward.
 The two differ in exactly one place: this takes a plain per-graph mean over
 nodes where the training model calls torch_geometric's global_mean_pool. They
@@ -138,6 +147,41 @@ class DeployedValueNetwork(torch.nn.Module):
         return self.evaluator(torch.cat([pooled, g], dim=1)).view(-1)
 
 
+class DeployedFlatNetwork(torch.nn.Module):
+    """The flat-MLP ablation (training/ValueNetworkFlat.py), behind the same
+    forward signature as DeployedValueNetwork so both can be scored side by
+    side on one pass of one dataset.
+
+    That side-by-side is the whole point: a flat model and a DeepSets model
+    compared from their own separate validation passes are comparable only as
+    far as the two passes happened to align, whereas here every model sees
+    byte-identical samples in identical order. Since the flat architecture is
+    the thing under test, that distinction is not a technicality.
+
+    Padding and flattening go through StateParserFlat.pad_and_flatten rather
+    than being rebuilt here, so this scores the layout the model was actually
+    trained on.
+    """
+
+    def __init__(self, state_dict):
+        super().__init__()
+        from StateParserFlat import FLAT_DIM
+        indices = sorted({int(k.split(".")[1]) for k in state_dict if k.startswith("mlp.")})
+        layers = []
+        for pos, idx in enumerate(indices):
+            out_features, in_features = state_dict[f"mlp.{idx}.weight"].shape
+            layers.append(torch.nn.Linear(in_features, out_features))
+            if pos < len(indices) - 1:
+                layers.append(torch.nn.ReLU())
+        self.mlp = torch.nn.Sequential(*layers)
+        self.flat_dim = FLAT_DIM
+
+    def forward(self, x, batch_index, num_graphs, u):
+        from StateParserFlat import batch_pad_and_flatten
+        z = batch_pad_and_flatten(x, batch_index, u, num_graphs=num_graphs)
+        return self.mlp(z).view(-1)
+
+
 def load_checkpoint(path):
     state_dict = torch.load(path, map_location="cpu")
     if not isinstance(state_dict, dict):
@@ -147,6 +191,33 @@ def load_checkpoint(path):
     # failing on them.
     if "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
         state_dict = state_dict["state_dict"]
+
+    # train_flat.py trains a FlatGraphAdapter wrapping the MLP, so its keys are
+    # prefixed "flat." -- strip it, as export_flat_to_onnx.py does.
+    if any(k.startswith("flat.mlp.") for k in state_dict):
+        state_dict = {k[len("flat."):]: v for k, v in state_dict.items()
+                      if k.startswith("flat.")}
+
+    # Dispatch on the checkpoint's own keys. A flat checkpoint has mlp.* and no
+    # node_encoder.*; guessing wrong here would score one architecture through
+    # the other's forward pass and report the result as an ablation.
+    if any(k.startswith("mlp.") for k in state_dict):
+        from StateParserFlat import FLAT_DIM
+        model = DeployedFlatNetwork(state_dict)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            raise ValueError(f"state_dict does not match the flat network "
+                             f"(missing={list(missing)}, unexpected={list(unexpected)})")
+        got = model.mlp[0].in_features
+        if got != FLAT_DIM:
+            raise ValueError(
+                f"flat checkpoint expects a {got}-dim input but the current flat schema "
+                f"(training/StateParserFlat.py, MAX_NODES={FLAT_DIM // NODE_DIM}) produces "
+                f"{FLAT_DIM}. This checkpoint was trained against a different MAX_NODES -- "
+                f"the numbers would be meaningless.")
+        model.eval()
+        return model
+
     model = DeployedValueNetwork(state_dict)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:

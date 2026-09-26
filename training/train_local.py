@@ -134,7 +134,18 @@ def run_validation(model, val_loader, criterion, device):
     return e_val_loss, e_val_acc, all_probs, all_targets, all_prestige_clocks
 
 
-def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir, seed):
+def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir, seed,
+                model_factory=None, checkpoint_prefix="deepsets_value_network",
+                run_config_extra=None):
+    """model_factory, checkpoint_prefix and run_config_extra exist so that the
+    flat-MLP ablation (training/train_flat.py) runs through THIS loop rather
+    than a copy of it -- same optimizer, scheduler, metrics, checkpointing and
+    seeding, so the two arms differ in the model and nothing else.
+
+    Left unset, every one of them reproduces the original behaviour exactly,
+    including the point in the RNG stream at which the model is constructed:
+    seed_everything runs first, then the factory, so weight initialisation
+    consumes the torch RNG in the same order it always did."""
     print("Starting training run")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -146,7 +157,11 @@ def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir
     device = pick_device()
     print(f"Using device: {device}")
 
-    model = TributeValueNetwork(node_in_dim=NODE_DIM, global_in_dim=GLOBAL_DIM)
+    if model_factory is None:
+        model = TributeValueNetwork(node_in_dim=NODE_DIM, global_in_dim=GLOBAL_DIM)
+    else:
+        model = model_factory()
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
@@ -216,7 +231,7 @@ def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir
         print(f"  val metrics by prestige clock (global[{PRESTIGE_CLOCK_GLOBAL_INDEX}]):")
         print_bucketed_metrics(val_probs, val_targets, val_prestige_clocks)
 
-        torch.save(model.state_dict(), os.path.join(out_dir, f"deepsets_value_network_epoch{epoch+1}.pth"))
+        torch.save(model.state_dict(), os.path.join(out_dir, f"{checkpoint_prefix}_epoch{epoch+1}.pth"))
 
         if e_val_loss < best_val_loss:
             best_val_loss = e_val_loss
@@ -227,10 +242,13 @@ def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir
             json.dump(history, f)
 
     with open(os.path.join(out_dir, "run_config.json"), "w") as f:
-        json.dump({"seed": seed, "epochs": epochs, "batch_size": batch_size, "lr": lr,
-                   "num_workers": num_workers, "train_dir": os.path.abspath(train_dir),
-                   "val_dir": os.path.abspath(val_dir), "torch_version": torch.__version__,
-                   "best_val_loss": best_val_loss}, f, indent=2)
+        run_config = {"seed": seed, "epochs": epochs, "batch_size": batch_size, "lr": lr,
+                      "num_workers": num_workers, "train_dir": os.path.abspath(train_dir),
+                      "val_dir": os.path.abspath(val_dir), "torch_version": torch.__version__,
+                      "parameters": sum(p.numel() for p in model.parameters()),
+                      "best_val_loss": best_val_loss}
+        run_config.update(run_config_extra or {})
+        json.dump(run_config, f, indent=2)
 
     print(f"\nDone. Best val loss: {best_val_loss:.4f} ({best_model_path})")
     return best_model_path
