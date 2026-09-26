@@ -15,6 +15,10 @@ represented, and diffs:
   - node matrix row count (exact)
   - node matrix contents (each side's rows sorted lexicographically first,
     since row order may legitimately differ between the two implementations)
+  - node matrix ROW ORDER, unsorted, reported separately. Sorting is right for
+    the DeepSets model, which mean-pools and cannot see order -- but it means
+    order parity would otherwise never be tested, and the flat-MLP ablation
+    (REPRODUCE.md section 9) is not permutation-invariant.
   - global vector, element by element
 
 Reports the max abs delta per column, labelled by feature block, EVEN WHEN
@@ -37,6 +41,8 @@ import random
 import subprocess
 import sys
 import tempfile
+
+import numpy as np
 from collections import defaultdict
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -166,6 +172,8 @@ def main():
     node_deltas = defaultdict(float)
     global_deltas = [0.0] * GLOBAL_DIM
     row_count_mismatches = []
+    order_identical = 0
+    order_mismatches = []
 
     for case in cases:
         cid = case["id"]
@@ -190,10 +198,47 @@ def main():
                     if d > node_deltas[j]:
                         node_deltas[j] = d
 
+            # ROW ORDER, unsorted. The comparison above sorts both sides first,
+            # which is correct for the DeepSets model -- it mean-pools, so row
+            # order genuinely cannot reach its output -- but it means order
+            # parity was never actually tested. It matters for any model that
+            # is NOT permutation-invariant, the flat-MLP ablation in
+            # REPRODUCE.md section 9 being the one that exists.
+            #
+            # Compared at float32, because both sides produce float32 and a
+            # JSON round-trip perturbs the float64 view of the same value.
+            # Comparing in float64 reports a mismatch on essentially every
+            # state and means nothing.
+            order_ok = all(
+                np.float32(row_py[j]) == np.float32(row_cs[j])
+                for row_py, row_cs in zip(py_node, cs_node)
+                for j in range(NODE_DIM))
+            if order_ok:
+                order_identical += 1
+            else:
+                order_mismatches.append(cid)
+
         for j in range(GLOBAL_DIM):
             d = abs(py_global[j] - cs_global[j])
             if d > global_deltas[j]:
                 global_deltas[j] = d
+
+    print()
+    print("=" * 78)
+    print("NODE ROW ORDER (unsorted)")
+    print("=" * 78)
+    n_cmp = len(cases) - len(row_count_mismatches)
+    print(f"  identical row order: {order_identical}/{n_cmp}")
+    if order_mismatches:
+        print(f"  DIFFERENT row order: {len(order_mismatches)} state(s), "
+              f"e.g. {', '.join(order_mismatches[:3])}")
+        print(f"  The DeepSets model mean-pools and is unaffected. Any model that is")
+        print(f"  NOT permutation-invariant -- the flat-MLP ablation, REPRODUCE.md")
+        print(f"  section 9 -- would be trained on one order and served another.")
+    else:
+        print(f"  Both implementations emit the nine location blocks in the same order")
+        print(f"  and the same order within each block, so a non-permutation-invariant")
+        print(f"  model sees the same vector in training and in a game.")
 
     print()
     print("=" * 78)

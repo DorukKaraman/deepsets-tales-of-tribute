@@ -44,8 +44,10 @@ import os
 import torch
 
 from StateParser import NODE_DIM, GLOBAL_DIM
-from StateParserFlat import FLAT_DIM, FLAT_NODE_DIM, MAX_NODES, pad_and_flatten
-from ValueNetworkFlat import FLAT_CONFIGS, TributeValueNetworkFlat, count_parameters
+from StateParserFlat import (FLAT_DIM, FLAT_NODE_DIM, MAX_NODES, pad_and_flatten,
+                             row_sort_key)
+from ValueNetworkFlat import (FLAT_CONFIGS, SORTED_ARCHS, TributeValueNetworkFlat,
+                              count_parameters)
 from export_to_onnx import (
     FLUSH_THRESHOLD,
     VERIFY_ATOL,
@@ -77,19 +79,27 @@ class FlatONNXWrapper(torch.nn.Module):
     real.
     """
 
-    def __init__(self, flat_model):
+    def __init__(self, flat_model, sort=False):
         super().__init__()
         self.mlp = flat_model.mlp
+        self.sort = sort
 
     def forward(self, x, u):
         x = x[:MAX_NODES]
+        if self.sort:
+            # Sort BEFORE padding, matching StateParserFlat.pad_and_flatten.
+            # torch.argsort lowers to TopK, which opset 14 has; the key is
+            # computed in float64 so that distinct rows cannot collide and get
+            # ordered by TopK's tie-breaking, which is not guaranteed to agree
+            # with PyTorch's.
+            x = x[torch.argsort(row_sort_key(x), dim=0)]
         pad_rows = MAX_NODES - x.shape[0]
         x = torch.cat([x, x.new_zeros(pad_rows, NODE_DIM)], dim=0)
         flat = x.reshape(1, FLAT_NODE_DIM)
         return self.mlp(torch.cat([flat, u], dim=1))
 
 
-def verify_flat_export(base_model, onnx_filename):
+def verify_flat_export(base_model, onnx_filename, sort=False):
     """Same contract as export_to_onnx.verify_export: combined tolerance
     atol + rtol*|torch|, fixed seed, single-threaded session, nothing written
     unless every node count passes.
@@ -138,7 +148,7 @@ def verify_flat_export(base_model, onnx_filename):
         x = torch.randn(n, NODE_DIM, dtype=torch.float32, generator=gen)
         u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32, generator=gen)
         with torch.no_grad():
-            ref = base_model(pad_and_flatten(x, u).unsqueeze(0)).item()
+            ref = base_model(pad_and_flatten(x, u, sort=sort).unsqueeze(0)).item()
         got = float(sess.run(None, {
             "node_features": x.numpy(),
             "global_features": u.numpy(),
@@ -226,7 +236,7 @@ def export_flat_model(checkpoint_path, onnx_filename, arch="matched", flush=True
         print()
         export_source = base_model
 
-    wrapped_model = FlatONNXWrapper(export_source)
+    wrapped_model = FlatONNXWrapper(export_source, sort=arch in SORTED_ARCHS)
 
     # 15 nodes, matching export_to_onnx.py. The trace is over a dynamic axis, so
     # the particular value only has to be a count the graph handles normally --
@@ -257,7 +267,7 @@ def export_flat_model(checkpoint_path, onnx_filename, arch="matched", flush=True
 
     print(f"Exported to a temporary file, verifying before writing {onnx_filename} ...")
     try:
-        verify_flat_export(base_model, tmp_filename)
+        verify_flat_export(base_model, tmp_filename, sort=arch in SORTED_ARCHS)
     except BaseException:
         # BaseException, not Exception: a KeyboardInterrupt or a SLURM timeout
         # mid-verification must not leave the temp file behind either.

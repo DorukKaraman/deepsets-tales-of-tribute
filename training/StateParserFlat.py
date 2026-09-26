@@ -55,6 +55,7 @@ Corpus statistics (all 3,116,065 states, both the heuristic and neural halves):
     min 25   median 33   mean 34.3   p90 44   p95 49   p99 61   p99.9 77   max 128
 """
 
+import numpy as np
 import torch
 
 from StateParser import NODE_DIM, GLOBAL_DIM, json_to_pyg_graph
@@ -67,9 +68,75 @@ MAX_NODES = 128
 FLAT_NODE_DIM = MAX_NODES * NODE_DIM      # 12,672
 FLAT_DIM = FLAT_NODE_DIM + GLOBAL_DIM     # 12,691
 
+# ---------------------------------------------------------------------------
+# Canonical row order (the `matched_sorted` arm)
+# ---------------------------------------------------------------------------
+#
+# WHY A SORTED ARM EXISTS. A plain flat MLP reads the node matrix slot by slot,
+# so it is not permutation-invariant -- and the agent's search reshuffles the
+# hidden piles on every determinisation. Measured on the trained models,
+# reshuffling one board moves flat-matched's logit by sd 0.40, which is 1.21x
+# the change a real move produces, and flips its predicted winner on 26% of
+# states. DeepSets moves by exactly 0. So an unsorted flat baseline conflates
+# two different deficits: a worse evaluator, and no permutation invariance.
+#
+# Sorting the rows into a canonical order before flattening removes the second
+# one. It is also what anyone feeding a set to an MLP would actually do, so an
+# unsorted-only baseline is open to the objection that it was built naive.
+#
+# THE KEY. location (0-8) is the primary key, so the flattened vector keeps its
+# block structure; within a location, rows are ordered by a fixed random
+# projection of the 90 feature dimensions. The key is a pure function of the
+# row's own values, so it depends on the multiset of rows and not on the order
+# they arrived in -- which is the whole requirement. Identical rows tie, and
+# that is harmless: they are identical, so their relative order cannot change
+# the flattened vector.
+#
+# The key must SEPARATE distinct rows, though. Two different rows sharing a key
+# would be ordered by argsort's internal tie-breaking, which is not guaranteed
+# to agree between PyTorch and onnxruntime, and would surface as a
+# torch/ONNX mismatch on some states and not others. Two things guard that:
+#
+#   - the key is computed in float64. Packing location into the same scalar as
+#     the projection costs precision, and in float32 at a key magnitude of
+#     ~8000 the spacing is 5e-4, which collided 8 distinct rows out of 523.
+#     SORT_KEY_LOC_SCALE keeps the magnitude small AND float64 keeps the
+#     spacing negligible; measured collisions: 0 of 523 distinct rows.
+#   - tools/verify_flat_parity.py re-measures that on every run, so a feature
+#     schema change that introduces a collision fails loudly rather than
+#     producing a silent torch/ONNX divergence.
+#
+# SORT_KEY_LOC_SCALE must exceed the range of the projection, or location stops
+# being the primary key. The projection lands in [0.028, 2.58] on real rows;
+# 4.0 leaves margin and keeps the largest key near 34.
+SORT_KEY_SEED = 20260927
+SORT_KEY_LOC_SCALE = 4.0
 
-def pad_and_flatten(x, u):
+_sort_proj_np = np.random.default_rng(SORT_KEY_SEED).random(NODE_DIM - 9)
+SORT_PROJECTION = torch.tensor(_sort_proj_np, dtype=torch.float64)
+_LOC_WEIGHTS = torch.arange(9, dtype=torch.float64)
+
+
+def row_sort_key(x):
+    """[..., NODE_DIM] -> [...] float64 sort key. location * scale + projection."""
+    feats = x[..., :NODE_DIM - 9].to(torch.float64)
+    locs = x[..., NODE_DIM - 9:].to(torch.float64)
+    return (locs @ _LOC_WEIGHTS) * SORT_KEY_LOC_SCALE + feats @ SORT_PROJECTION
+
+
+def canonical_order(x):
+    """[n, NODE_DIM] -> the same rows in canonical order."""
+    return x[torch.argsort(row_sort_key(x), dim=0)]
+
+
+def pad_and_flatten(x, u, sort=False):
     """[n, NODE_DIM] node matrix + [1, GLOBAL_DIM] globals -> [FLAT_DIM] vector.
+
+    sort=True puts the rows in canonical order first (the `matched_sorted`
+    arm). Sorting happens BEFORE padding, so the padding stays at the tail
+    where the model was trained to find it -- an all-zero row's key is 0.0,
+    below every real row's, so sorting after padding would move the padding to
+    the front and displace everything.
 
     The single definition of the flat layout. Both json_to_flat_vector (one
     state, from JSON) and batch_pad_and_flatten (a PyG batch, during training)
@@ -83,13 +150,15 @@ def pad_and_flatten(x, u):
     """
     if x.shape[0] > MAX_NODES:
         x = x[:MAX_NODES]
+    if sort:
+        x = canonical_order(x)
 
     padded = x.new_zeros(MAX_NODES, NODE_DIM)
     padded[:x.shape[0]] = x
     return torch.cat([padded.reshape(-1), u.reshape(-1)])
 
 
-def batch_pad_and_flatten(x, batch, u, num_graphs=None):
+def batch_pad_and_flatten(x, batch, u, num_graphs=None, sort=False):
     """PyG batch -> [B, FLAT_DIM], the training-time path.
 
     WHY THE SHUFFLE BUFFER STILL HOLDS COMPACT GRAPHS. The obvious design is to
@@ -109,12 +178,20 @@ def batch_pad_and_flatten(x, batch, u, num_graphs=None):
     """
     from torch_geometric.utils import to_dense_batch
 
-    dense, _ = to_dense_batch(x, batch, batch_size=num_graphs,
-                              max_num_nodes=MAX_NODES)   # [B, MAX_NODES, NODE_DIM]
+    dense, mask = to_dense_batch(x, batch, batch_size=num_graphs,
+                                 max_num_nodes=MAX_NODES)  # [B, MAX_NODES, NODE_DIM]
+    if sort:
+        # to_dense_batch has already padded, so the padding has to be pinned to
+        # the tail explicitly: an all-zero row's key is 0.0, which sorts ahead
+        # of every real row. +inf on the masked-out positions reproduces the
+        # per-state path, which sorts before padding.
+        key = row_sort_key(dense).masked_fill(~mask, float("inf"))
+        order = torch.argsort(key, dim=1)
+        dense = torch.gather(dense, 1, order.unsqueeze(-1).expand(-1, -1, NODE_DIM))
     return torch.cat([dense.reshape(dense.shape[0], FLAT_NODE_DIM), u], dim=1)
 
 
-def json_to_flat_vector(game_state):
+def json_to_flat_vector(game_state, sort=False):
     """One logged game state -> [FLAT_DIM] float32 vector.
 
     The reference definition of the flat encoding, and the thing a C#
@@ -125,4 +202,4 @@ def json_to_flat_vector(game_state):
     through the unchanged FeatureExtractor in DeepSetsCore.cs.
     """
     graph = json_to_pyg_graph(game_state)
-    return pad_and_flatten(graph.x, graph.u)
+    return pad_and_flatten(graph.x, graph.u, sort=sort)

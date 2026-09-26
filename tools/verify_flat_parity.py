@@ -13,6 +13,12 @@ assembly happens:
   2. batch_pad_and_flatten    a PyG batch, the training path (to_dense_batch)
   3. FlatONNXWrapper          the exported graph, in traced ONNX ops
 
+The canonical-order arm (matched_sorted) adds a fourth thing that can be
+wrong and is checked here too: the sort key must SEPARATE distinct rows. Two
+distinct rows sharing a key are ordered by argsort's internal tie-breaking,
+which PyTorch and onnxruntime need not resolve the same way, so a collision
+surfaces as a torch/ONNX mismatch on some states and not others.
+
 All three must produce the same vector or the model is trained on one layout
 and served on another -- a failure that would show up as an inexplicably weak
 baseline and would be read as evidence about architecture. #3 is checked
@@ -52,8 +58,8 @@ try:
     from torch_geometric.data import Batch  # noqa: E402
     from StateParser import NODE_DIM, GLOBAL_DIM, json_to_pyg_graph  # noqa: E402
     from StateParserFlat import (  # noqa: E402
-        FLAT_DIM, FLAT_NODE_DIM, MAX_NODES,
-        batch_pad_and_flatten, json_to_flat_vector, pad_and_flatten,
+        FLAT_DIM, FLAT_NODE_DIM, MAX_NODES, SORT_KEY_LOC_SCALE,
+        batch_pad_and_flatten, json_to_flat_vector, pad_and_flatten, row_sort_key,
     )
 except ImportError as e:  # pragma: no cover - environment problem, not logic
     sys.exit(f"ERROR: could not import the training modules ({e}).\n"
@@ -206,7 +212,78 @@ def main():
     print(f"   (first batch spans {spread} distinct node count(s) -- a batch of one "
           f"count would not test padding)")
 
-    total = failures + batch_failures
+    # 3. The canonical-order path (matched_sorted). Three things have to hold,
+    #    and each fails in a different, silent way:
+    #      - the sort key must SEPARATE distinct rows, or argsort's tie-breaking
+    #        decides the order and PyTorch and onnxruntime need not agree;
+    #      - the flattened vector must be invariant to row order, which is the
+    #        entire point of the arm;
+    #      - the batched training path must agree with the per-state reference,
+    #        as in check 2.
+    sort_failures = 0
+
+    distinct = {tuple(r.tolist()) for g in graphs for r in g.x}
+    R = torch.tensor(sorted(distinct), dtype=torch.float32)
+    keys = row_sort_key(R)
+    n_unique = len(torch.unique(keys))
+    if n_unique != len(R):
+        sort_failures += 1
+        print(f"  FAIL sort key collides: {len(R) - n_unique} of {len(R)} distinct rows "
+              f"share a key with another distinct row.")
+        print(f"       Distinct rows with equal keys are ordered by argsort's internal "
+              f"tie-breaking, which PyTorch and onnxruntime need not resolve the same "
+              f"way -- expect a torch/ONNX mismatch on some states and not others.")
+        print(f"       Raise SORT_KEY_LOC_SCALE, or reseed SORT_KEY_SEED, in "
+              f"training/StateParserFlat.py.")
+
+    # location must remain the PRIMARY key, or the flattened vector loses its
+    # block structure and the sorted arm stops being comparable to the others.
+    loc_ids = (R[:, NODE_DIM - 9:].to(torch.float64) @ torch.arange(9, dtype=torch.float64))
+    bands = torch.floor(keys / SORT_KEY_LOC_SCALE)
+    if not torch.equal(bands, loc_ids):
+        sort_failures += 1
+        print(f"  FAIL location is no longer the primary sort key -- "
+              f"SORT_KEY_LOC_SCALE is too small for the projection's range.")
+
+    perm_failures = 0
+    rng = random.Random(args.seed)
+    for g in graphs:
+        ref = pad_and_flatten(g.x, g.u, sort=True)
+        for _ in range(4):
+            order = list(range(g.x.shape[0]))
+            rng.shuffle(order)
+            got = pad_and_flatten(g.x[order], g.u, sort=True)
+            if not torch.equal(got, ref):
+                perm_failures += 1
+                break
+    if perm_failures:
+        sort_failures += perm_failures
+        print(f"  FAIL {perm_failures} state(s) give a different flattened vector under "
+              f"row permutation, so the sorted arm is not permutation-invariant.")
+
+    sorted_batch_failures = 0
+    for start in range(0, len(graphs), args.batch_size):
+        chunk = graphs[start:start + args.batch_size]
+        if not chunk:
+            continue
+        batch = Batch.from_data_list(chunk)
+        got = batch_pad_and_flatten(batch.x, batch.batch, batch.u,
+                                    num_graphs=len(chunk), sort=True)
+        want = torch.stack([pad_and_flatten(g.x, g.u, sort=True) for g in chunk])
+        if got.shape != want.shape or not torch.equal(got, want):
+            sorted_batch_failures += 1
+    if sorted_batch_failures:
+        sort_failures += sorted_batch_failures
+        print(f"  FAIL {sorted_batch_failures} sorted batch(es) differ from the "
+              f"per-state reference.")
+
+    print(f"3. Canonical order (matched_sorted): "
+          f"{'PASS' if sort_failures == 0 else f'{sort_failures} FAILURE(S)'}")
+    print(f"   sort key separates {n_unique}/{len(R)} distinct rows; "
+          f"{len(graphs)} states x 4 permutations invariant; "
+          f"batched path matches per-state")
+
+    total = failures + batch_failures + sort_failures
     print()
     if total:
         sys.exit(f"FAILED: {total} problem(s). The flat encoder does not agree with "

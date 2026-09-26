@@ -45,18 +45,26 @@
 # WHICH NETWORK, AND WHERE IT LANDS. Two environment variables, both with
 # today's behaviour as their default, so an unchanged submission is unchanged:
 #
-#   ARCH=deepsets   (default) train_local.py + export_to_onnx.py
-#   ARCH=matched              train_flat.py --arch matched + export_flat_to_onnx.py
-#   ARCH=wide                 train_flat.py --arch wide    + export_flat_to_onnx.py
-#   OUT_ROOT=...    (default $HPCWORK/tot_models)
+#   ARCH=deepsets       (default) train_local.py + export_to_onnx.py
+#   ARCH=matched                  train_flat.py --arch matched        + export_flat_to_onnx.py
+#   ARCH=wide                     train_flat.py --arch wide           + export_flat_to_onnx.py
+#   ARCH=matched_sorted           train_flat.py --arch matched_sorted + export_flat_to_onnx.py
+#   OUT_ROOT=...        (default $HPCWORK/tot_models)
 #
 # matched and wide are the flat-MLP ablation (REPRODUCE.md section 9). Give
 # them their own OUT_ROOT -- the default directory holds the paper's per-seed
 # models, and the output path depends only on the array index, so an ablation
 # run at --seed 0 would otherwise land on top of seed_00:
 #
-#   ARCH=matched OUT_ROOT="$HPCWORK/tot_ablation/matched" sbatch scripts/slurm_train.sh
-#   ARCH=wide    OUT_ROOT="$HPCWORK/tot_ablation/wide"    sbatch scripts/slurm_train.sh
+#   ARCH=matched        OUT_ROOT="$HPCWORK/tot_ablation/matched"        sbatch scripts/slurm_train.sh
+#   ARCH=wide           OUT_ROOT="$HPCWORK/tot_ablation/wide"           sbatch scripts/slurm_train.sh
+#   ARCH=matched_sorted OUT_ROOT="$HPCWORK/tot_ablation/matched_sorted" sbatch scripts/slurm_train.sh
+#
+# matched_sorted is matched with the node rows put into a canonical order
+# before flattening -- same widths, same 72,549 parameters. It exists because
+# the unsorted flat models are not permutation-invariant and the agent's search
+# reshuffles hidden piles on every determinisation, so the unsorted arms'
+# game results conflate evaluator quality with the lack of invariance.
 #
 # The script refuses to start if the target seed directory already holds a
 # best_model.pth. FORCE=1 overrides that; nothing else does.
@@ -141,9 +149,9 @@ if [ -z "${HPCWORK:-}" ]; then
 fi
 
 case "$ARCH" in
-  deepsets|matched|wide) ;;
+  deepsets|matched|wide|matched_sorted) ;;
   *)
-    echo "ERROR: ARCH=$ARCH is not one of: deepsets, matched, wide." >&2
+    echo "ERROR: ARCH=$ARCH is not one of: deepsets, matched, wide, matched_sorted." >&2
     exit 1
     ;;
 esac

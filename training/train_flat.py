@@ -23,21 +23,33 @@ export step pointed at export_flat_to_onnx.py. run_config.json additionally
 records arch, widths, input dim and parameter count, so a directory of runs is
 self-describing when it comes time to put the numbers in a table.
 
-  --arch matched   12,691 -> 5 -> 128 -> 64 -> 1        72,549 params (0.99x DeepSets)
-  --arch wide      12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 params (22.57x)
+  --arch matched         12,691 -> 5 -> 128 -> 64 -> 1        72,549 params (0.99x DeepSets)
+  --arch wide            12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 params (22.57x)
+  --arch matched_sorted  identical to matched, but the node rows are put into a
+                         canonical order before flattening -- same widths, same
+                         72,549 parameters, so the only difference is permutation
+                         invariance
 
-Run BOTH. "matched" asks whether the set structure helps at equal capacity;
-"wide" asks whether it helps even when the flat model has 22x the capacity, and
-only "wide" answers the objection that the matched model was starved into
-losing. See ValueNetworkFlat for why matched is a 5-unit first layer and why
-that is a property of flattening a 12,691-dim input on a 73k budget rather than
-a choice that could have been made differently.
+Run all three. "matched" asks whether the set structure helps at equal
+capacity; "wide" asks whether it helps even when the flat model has 22x the
+capacity, and only "wide" answers the objection that the matched model was
+starved. "matched_sorted" answers a different objection: that an unsorted flat
+baseline is naive, since the standard way to feed a set to an MLP is to sort it
+canonically first. Without it, the gap in GAMES conflates a worse evaluator
+with the absence of permutation invariance -- and the agent's search reshuffles
+hidden piles on every determinisation, which measurably moves an unsorted flat
+model's output more than a real move does.
+
+See ValueNetworkFlat for why matched is a 5-unit first layer, and why that is a
+property of flattening a 12,691-dim input on a 73k budget rather than a choice
+that could have been made differently.
 """
 
 import argparse
 
 from StateParserFlat import FLAT_DIM, MAX_NODES
-from ValueNetworkFlat import FLAT_CONFIGS, build_flat_model, count_parameters
+from ValueNetworkFlat import (FLAT_CONFIGS, SORTED_ARCHS, build_flat_model,
+                              count_parameters)
 from train_local import train_model
 
 
@@ -50,7 +62,8 @@ def main():
                         help="Directory of val shards (tools/split_dataset.py's val/)")
     parser.add_argument("--arch", default="matched", choices=sorted(FLAT_CONFIGS),
                         help="matched = parameter-matched to DeepSets (72,549); "
-                             "wide = 22.57x capacity (1,649,409). Run both.")
+                             "wide = 22.57x capacity (1,649,409); matched_sorted = "
+                             "matched with canonically ordered rows. Run all three.")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.0005)
@@ -77,6 +90,7 @@ def main():
     print(f"=== FLAT-MLP ABLATION ({args.arch}) ===")
     print(f"  input      : {FLAT_DIM:,} ({MAX_NODES} nodes x 99 + 19 global)")
     print(f"  shape      : {shape}")
+    print(f"  row order  : {'canonical (sorted)' if args.arch in SORTED_ARCHS else 'as emitted'}")
     print(f"  parameters : {n_params:,}")
     print()
 
@@ -92,6 +106,7 @@ def main():
             "shape": shape,
             "max_nodes": MAX_NODES,
             "input_dim": FLAT_DIM,
+            "canonical_row_order": args.arch in SORTED_ARCHS,
         },
     )
 

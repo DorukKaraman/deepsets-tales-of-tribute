@@ -78,7 +78,15 @@ from StateParserFlat import FLAT_DIM, batch_pad_and_flatten
 FLAT_CONFIGS = {
     "matched": (5, 128, 64),
     "wide": (128, 128, 64),
+    "matched_sorted": (5, 128, 64),
 }
+
+# Archs that put the node rows into a canonical order before flattening.
+# matched_sorted is byte-for-byte the same network as matched -- same widths,
+# same 72,549 parameters -- differing only in that the rows arrive sorted, so
+# any difference between the two arms is attributable to permutation
+# invariance and to nothing else.
+SORTED_ARCHS = {"matched_sorted"}
 
 
 class TributeValueNetworkFlat(nn.Module):
@@ -117,15 +125,17 @@ class FlatGraphAdapter(nn.Module):
     this class reaches the .onnx file.
     """
 
-    def __init__(self, flat_model):
+    def __init__(self, flat_model, sort=False):
         super().__init__()
         self.flat = flat_model
+        self.sort = sort
 
     def forward(self, data):
         batch = data.batch if getattr(data, "batch", None) is not None else \
             torch.zeros(data.x.size(0), dtype=torch.long, device=data.x.device)
         num_graphs = data.u.shape[0]
-        z = batch_pad_and_flatten(data.x, batch, data.u, num_graphs=num_graphs)
+        z = batch_pad_and_flatten(data.x, batch, data.u, num_graphs=num_graphs,
+                                  sort=self.sort)
         return self.flat(z)
 
 
@@ -135,7 +145,7 @@ def build_flat_model(arch="matched"):
         raise ValueError(f"unknown arch {arch!r}; choose from {sorted(FLAT_CONFIGS)}")
     h1, h2, h3 = FLAT_CONFIGS[arch]
     inner = TributeValueNetworkFlat(in_dim=FLAT_DIM, h1=h1, h2=h2, h3=h3)
-    return FlatGraphAdapter(inner), inner
+    return FlatGraphAdapter(inner, sort=arch in SORTED_ARCHS), inner
 
 
 def count_parameters(model):
@@ -146,11 +156,14 @@ if __name__ == "__main__":
     from ValueNetwork import TributeValueNetwork
 
     deepsets = count_parameters(TributeValueNetwork())
-    print(f"{'config':<10}{'input':>9}  {'shape':<32}{'parameters':>12}{'vs DeepSets':>13}")
-    print(f"{'deepsets':<10}{'set':>9}  {'99->128->128 pooled, 256->128->64->1':<32}"
-          f"{deepsets:>12,}{'1.00x':>13}")
+    print(f"{'config':<16}{'input':>9}  {'shape':<38}{'rows':<11}"
+          f"{'parameters':>12}{'vs DeepSets':>13}")
+    print(f"{'deepsets':<16}{'set':>9}  {'99->128->128 pooled, 256->128->64->1':<38}"
+          f"{'n/a (set)':<11}{deepsets:>12,}{'1.00x':>13}")
     for name in FLAT_CONFIGS:
         _, inner = build_flat_model(name)
         n = count_parameters(inner)
         shape = f"{FLAT_DIM}->" + "->".join(str(w) for w in inner.widths) + "->1"
-        print(f"{name:<10}{FLAT_DIM:>9,}  {shape:<32}{n:>12,}{n / deepsets:>12.2f}x")
+        rows = "canonical" if name in SORTED_ARCHS else "as emitted"
+        print(f"{name:<16}{FLAT_DIM:>9,}  {shape:<38}{rows:<11}"
+              f"{n:>12,}{n / deepsets:>12.2f}x")

@@ -343,20 +343,35 @@ that ran four times slower than the shipped one. All three causes are now fixed
 at the source — `onnx` is pinned in `scripts/setup_python_env.sh`, the tolerance
 is relative, and flushing is the export default, all described in [Export to
 ONNX](#4-export-to-onnx) — so a rerun should need none of them. The `.pth`
-checkpoints were never touched by any of this, which is why the validation
-losses below are still the losses of the weights that produced them.
+checkpoints were never touched by any of this: every intervention was to the
+export, so the losses below belong to exactly the weights each seed trained.
 
 **Results.**
 
-| Seed | Best val loss | ONNX SHA-256 (flushed re-export — the current files) |
+| Seed | Val loss (re-scored) | ONNX SHA-256 (flushed re-export — the current files) |
 |---|---|---|
-| 0 | 0.4385 | `b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258` |
-| 1 | 0.4369 | `1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df` |
-| 2 | 0.4402 | `56eb9f9113439848420e70674b1b2c8771d1b217df883e79dcd3b3a074976d90` |
-| 3 | 0.4329 | `cb30b934961dbe37365faf7c6d22df5b3e98054c2f45fbaef1789de8edf32e00` |
-| 4 | 0.4470 | `b77c2a6442a0685024f239fedcbe1a00fe1ce32159da633a40cbe57dffb8db84` |
+| 0 | **0.4343** | `b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258` |
+| 1 | 0.4419 | `1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df` |
+| 2 | 0.4437 | `56eb9f9113439848420e70674b1b2c8771d1b217df883e79dcd3b3a074976d90` |
+| 3 | 0.4452 | `cb30b934961dbe37365faf7c6d22df5b3e98054c2f45fbaef1789de8edf32e00` |
+| 4 | 0.4396 | `b77c2a6442a0685024f239fedcbe1a00fe1ce32159da633a40cbe57dffb8db84` |
 
-Mean 0.4391, sd 0.005. Those hashes are what go into a config's
+**Those losses are the re-scored ones** — all six checkpoints on the full
+validation split in one pass, 308,809 states, byte-identical samples. The full
+table, with accuracy, AUC and Brier, is under [Seed benchmark
+results](#seed-benchmark-results).
+
+> **Superseded: the losses this table used to carry.** `0.4385 / 0.4369 /
+> 0.4402 / 0.4329 / 0.4470` were what the training runs themselves printed, and
+> they are wrong as a comparison — each was computed on a *different* resampled
+> multiset of `val/`, because of the DataLoader sharding bug in [Known
+> limitations](#known-limitations). They are not merely noisier than the
+> re-scored figures, they rank the seeds differently: Spearman ρ = −0.50 between
+> the two orderings, with seed 3 going from best of the five to worst and seed 4
+> from worst to second best. Do not quote them, and re-derive rather than
+> re-check anything that rested on them.
+
+Those hashes are what go into a config's
 `allowed_onnx_sha256` when a seed's model is benchmarked via `SOT_MODEL_PATH`,
 and they are the ones
 [`experiments/configs/seed_benchmark.json`](experiments/configs/seed_benchmark.json)
@@ -373,25 +388,17 @@ weights. Do not put the old hashes back into any config; `seed_benchmark.json`'s
 
 **These val losses are not comparable to the shipped model's 0.4034.** That
 figure was measured on a different validation set, so the gap between it and
-this table says nothing about either. Compare the five seeds against each other,
-or score them all on one common set with `tools/evaluate_checkpoints.py` — that
-is what it is for.
+this table says nothing about either. The re-scored table under [Seed benchmark
+results](#seed-benchmark-results) puts all six on one common set, which is the
+comparison to use.
 
-The spread is also **tighter than the ±0.02 run-to-run variation measured in
-August**, and the two are not measuring the same thing: the August figure
-predates the shuffle-buffer seeding fix, so it mixed genuine seed-to-seed
-variation with nondeterministic data ordering.
-
-**Both figures are weaker than they look, and for the same reason.** Every val
-loss on this page was computed through a DataLoader that did not partition
-shards across workers, so each run validated on a different resampled multiset
-of `val/` — see
-[Known limitations](#known-limitations). The 0.005 spread across the seeds and
-the ±0.02 August noise floor therefore both mix model variance with sampling
-variance, and neither is a clean measure of the quantity it names. Re-scoring
-all six checkpoints on one common set with `tools/evaluate_checkpoints.py`,
-which is single-process and unaffected, is what would separate them; that is
-pending and has to run on the cluster against the full split's `val/`.
+Re-scored, the five seeds span **0.4343 to 0.4452 — 0.0109**. The **±0.02
+run-to-run variation measured in August** is not comparable to that and should
+not be read as a noise floor for it: the August figure predates both the
+shuffle-buffer seeding fix and the sharding fix, so it mixes genuine
+seed-to-seed variation with nondeterministic data ordering *and* with
+validating on a different resampled multiset each run. The 0.0109 here is
+measured on one fixed set and is clean.
 
 **We do not have the shipped model's training metrics.** The run that produced
 it (8 August 2026) left only the checkpoint and the exported ONNX behind; no
@@ -643,13 +650,13 @@ it is still not skippable.
 
 ## 7. Paper experiments
 
-Four questions across five configs — equal effort is asked twice, once from
+Five questions across six configs — equal effort is asked twice, once from
 each direction. One harness, one build. Each config is a JSON file in
 [`experiments/configs/`](experiments/configs/) — see
 [that directory's README](experiments/configs/README.md) for the format, and
 [`experiments/README.md`](experiments/README.md) for the agents they use.
 
-All five run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
+All six run `DeepSetsBotExp`, a copy of `DeepSetsBlendBot` with three
 environment hooks and nothing else changed. The submitted agents stay
 byte-identical; `SOT_ALPHA0=0` makes the copy behave as `DeepSetsBot` and the
 default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
@@ -661,6 +668,7 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 | `equal_effort` | Is the network better, or is the baseline just searching more? Treatment sped up. | 400 |
 | `equal_effort_baseline_slowed` | The same question, baseline slowed down instead. | 400 |
 | `seed_benchmark` | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. | 2400 |
+| `ablation_benchmark` | Does the DeepSets structure win *games*, or only validation loss? Three flat-MLP arms plus a control; a fourth, permutation-invariant arm is pending. | 1600 |
 
 ### Equal effort is run in both directions
 
@@ -970,12 +978,22 @@ p ≈ 0.006). That p-value is the one to distrust: seed 4 was selected for testi
 *because* it looked low, so the nominal significance is inflated by an unknown
 amount and should be read as "worth a second look", not as a finding.
 
-Noted without over-reading it: seed 4 has both the **highest validation loss**
-(0.4470) and the **highest evaluations per turn** (6,921). It searches the most
-and plays the worst. With n = 5 that is an observation, not a relationship —
-across all five, val loss and win rate do not line up cleanly either (seed 3 has
-the best loss and the second-best win rate; seed 2 has the third-best loss and
-the best win rate).
+**It is not a weak model offline — it is the strongest of the five on two
+metrics.** Re-scored on the full validation split, seed 4 has the **best
+accuracy** (78.28%) and the **best AUC** (0.8779) of all six checkpoints, and
+the second-best loss (0.4396). It also runs the **most evaluations per turn**
+(6,921). So the agent that searches the most, and whose model discriminates
+best offline, is the worst player in the group by 6.75 points.
+
+That inversion is the same one the [re-scored
+table](#seed-benchmark-results) shows for the shipped model, in the opposite
+direction, and it is the reason this section carries a win-rate column at all.
+It also corrects what this paragraph used to say. On the *old* buggy-loader
+losses seed 4 looked like the worst model offline (0.4470) as well as the worst
+player, which made a tidy story — bad model, bad play. That story was an
+artefact of each run validating on a different resampled multiset; on one
+common set it reverses. Nothing about seed 4's play changed, only what we
+believed about its model.
 
 #### The invalid first run is an accidental paired experiment
 
@@ -1412,17 +1430,129 @@ What this means for the comparison, stated carefully:
   parameters, 72.8% of them dead, and loses by more than `matched` does on
   every metric. Whatever the flat model is missing, it is not budget.
 
-### What is not built
+### The game benchmark
 
-No C# encoder and no bot. A flat bot would need no new encoder: the exported
-graph takes the same `(node_features, global_features)` inputs as the DeepSets
-model and pads internally, so `DeepSetsCore.cs` can load any of the three
-unchanged — verified on signature, dtype, output name and scale.
-[`experiments/configs/ablation_benchmark.json`](experiments/configs/ablation_benchmark.json)
-is ready to run that comparison in games, which is the test that matters given
-that the offline ranking of the seed models
-[did not predict their playing strength](#seed-benchmark-results).
+Offline metrics are not playing strength — the seed benchmark
+[demonstrated that directly](#seed-benchmark-results), with the shipped model
+last of six on every offline metric and first on win rate. So the ablation was
+run in games too.
 
+Job 4473540 plus smoke job 4473458,
+[`ablation_benchmark.json`](experiments/configs/ablation_benchmark.json):
+**1,200/1,200 games completed, all clean** — no timeouts, no disqualifications,
+nothing excluded — and every game's loaded model verified against its own row's
+hash, so no arm silently fell back to GameRunner's built-in copy.
+`DeepSetsBotExp` vs SakkirinaSolo, `alpha0 = 0`, 400 games per arm:
+
+| arm | evals/turn | Win rate | 95% CI | as P1 | as P2 |
+|---|---|---|---|---|---|
+| **deepsets** | 7,185 (1.00×) | **78.50%** | 74.21–82.24 | 86.0% | 71.0% |
+| flat_matched | 7,474 (1.04×) | 47.50% | 42.65–52.39 | 54.5% | 40.5% |
+| flat_wide | 2,839 (0.40×) | 36.00% | 31.45–40.82 | 46.0% | 26.0% |
+
+**A 1.9-point offline accuracy gap is a 31.0-point win-rate gap in games**
+(deepsets vs flat_matched, z ≈ 9.6). `flat_matched` does not merely lose to the
+control, it **loses to SakkirinaSolo** — the baseline the DeepSets agent beats
+four times out of five.
+
+**Search volume does not explain it.** `flat_matched` ran **1.04× the control's
+evaluations per turn** — slightly *more* search — and still lost by 31 points.
+My pre-run prediction for that row (0.81–0.94×, from its 1.24× slower
+inference) was simply wrong; the `flat_wide` prediction (0.20–0.48×) was right
+at 0.40×. `flat_wide` is doubly confounded — 2.5× less search *and* the
+overfitting visible in its rising validation loss — so read it as a direction,
+not a measurement.
+
+### Why the game gap is 16× the offline gap
+
+The offline and in-game gaps disagree by too much to leave alone. The cause is
+not a bug, and it is specific to the flat models.
+
+**Feature parity is exact, including row order.** `tools/verify_parity.py`
+sorts both node matrices before comparing, which is correct for DeepSets — it
+mean-pools, so row order cannot reach its output — but it meant order parity
+had never actually been tested, and the flat models are not order-invariant.
+Checked separately and now part of that tool: **300/300 states byte-identical
+unsorted**, same block order and same order within each block, and all three
+models give **bit-identical outputs** on C#-extracted and Python-extracted
+features. Nothing is wrong with the pipeline.
+
+**The search reshuffles the input.** The agent evaluates *determinised* states,
+in which the hidden piles — the current player's draw pile and the enemy's
+hand+draw, **46% of nodes in the median state** — are re-randomised. DeepSets
+cannot see that. A flat MLP reads its input slot by slot, and does:
+
+| model | reshuffle sd | ÷ one-move signal | exceeds the one-move gap | flips a winner |
+|---|---|---|---|---|
+| deepsets | **0.0000** | 0.00× | 0% of steps | 0/150 |
+| flat_matched | 0.4159 | **1.27×** | **70%** of steps | 22.7% of states |
+| flat_wide | 0.6574 | **1.32×** | **73%** of steps | 31.3% of states |
+
+The denominator is the logit change between consecutive states *one move
+apart*, because that is the scale a search has to resolve — not the spread
+across unrelated boards. **Re-determinising the same board moves a flat model's
+evaluation more than actually making a move does.** Inside ISMCTS, where one
+position is evaluated under many determinisations, that corrupts move ranking
+and backup statistics directly, and no offline metric computed on a single
+fixed ordering can see it.
+
+**The offline figures are also optimistic, by about 1.5–2.5 points.** Scored on
+a reshuffled order instead of the logged one, `flat_matched` loses 1.5–2.1
+accuracy points and `flat_wide` 1.9–2.5, depending on the sample; DeepSets
+loses exactly 0. So the honest offline gap is not 1.9 points but **roughly 3.4**
+— and even that does not approach 31.
+
+**It is not leaked information.** The obvious worry is that the logged pile
+order encodes the true upcoming draw order, which no player knows and a
+determiniser destroys. It does not: on single-card draws the front card of the
+logged draw pile is the one actually drawn **27.7% of the time against a 28.6%
+chance rate** — dead on chance, and below it on a larger sample (21.2% vs
+30.3%). Nor is it the duplicate clustering in the logged order (adjacent
+duplicates at 1.9–2.3× chance): a reshuffle that *preserves* that clustering
+recovers nothing consistent, **−0.58 ± 0.32 points** for `matched` and
+**+0.27 ± 0.33** for `wide`. The flat models fit the logged ordering
+distribution as a whole, and any reshuffle is off-distribution.
+
+```bash
+python tools/analyze_order_sensitivity.py all --data-dir "$SPLIT/val" \
+    --onnx deepsets=.../DeepSetsValueNetwork_seed_00.onnx \
+    --onnx matched=.../FlatValueNetwork_matched_seed_00.onnx \
+    --onnx wide=.../FlatValueNetwork_wide_seed_00.onnx
+```
+
+### What the game result does and does not establish
+
+**The 31 points are real and confounded.** Real: 1,200 clean games, every model
+hash-verified per row, more search for the losing arm, no feature-extraction
+bug. Confounded: the gap mixes **evaluator quality** with **the absence of
+permutation invariance under determinisation**, and this experiment cannot
+separate them.
+
+So the supported claim is the narrower one: **permutation invariance matters in
+this search.** "The set structure is a better evaluator" is what the offline
+result supports, at 1.9 points measured and ~3.4 corrected — not at 31.
+
+**The fourth arm settles it.** `flat-matched-sorted` is the same network and
+the same 72,549 parameters as `flat_matched`, with the node rows put into a
+canonical order before flattening, inside the model, so training, offline
+scoring and ONNX inference share one definition and no C# code changes.
+Verified permutation-invariant by construction: reshuffling changes the
+flattened vector, and the exported graph's output, by **exactly 0** — as it
+does for DeepSets. It is trained with `ARCH=matched_sorted` and benchmarked as
+task ids 1200–1599, appended so the first three arms' ids and results are
+untouched. **Its results are pending**; until they land, the difference between
+it and `flat_matched` is the unmeasured quantity this section turns on.
+
+```bash
+ARCH=matched_sorted OUT_ROOT="$HPCWORK/tot_ablation/matched_sorted" \
+    sbatch --array=0 scripts/slurm_train.sh
+# then add its ONNX sha256 to ablation_benchmark.json and submit 1200-1599
+```
+
+No C# encoder and no bot were needed for any of this: the exported graph takes
+the same `(node_features, global_features)` inputs as the DeepSets model and
+does its padding — and, for the sorted arm, its sorting — internally, so
+`DeepSetsCore.cs` loads all four unchanged.
 
 ## Known limitations
 
@@ -1477,13 +1607,23 @@ that the offline ranking of the seed models
   in unknown proportion. That bears directly on calling seed 3 the best and seed
   4 the worst, and on the ±0.02 noise floor, which was in part measuring this.
 
-  **Re-scored figures on one common set are pending, and must run on the
-  cluster.** `tools/evaluate_checkpoints.py` streams single-process and is
-  unaffected, so scoring all six checkpoints on the full split's `val/` settles
-  it without retraining anything. It cannot be done locally: the only local
-  validation set belongs to [section 9](#9-flat-mlp-ablation)'s subset, which
-  was split separately from the full corpus, so its val games may appear in the
-  shipped and seed models' *training* games.
+  **This has been re-scored, and the re-scored figures are the ones to use.**
+  All six checkpoints were run in one pass over the full split's `val/` —
+  308,809 states, byte-identical samples — with `tools/evaluate_checkpoints.py`,
+  which streams single-process and is unaffected. The table is under [Seed
+  benchmark results](#seed-benchmark-results). It had to run on the cluster: the
+  only local validation set belongs to [section 9](#9-flat-mlp-ablation)'s
+  subset, which was split separately from the full corpus, so its val games may
+  appear in the shipped and seed models' *training* games.
+
+  The re-scoring changed the answer rather than sharpening it. The five seeds'
+  ranking is **Spearman ρ = −0.50** against the buggy-loader ordering — seed 3
+  went from best to worst, seed 4 from worst to second best — so the old numbers
+  were not a noisy version of the right ones. The 0.4034 attached to
+  `ablation_heuristic_only.pth` has **not** been re-scored on a comparable
+  basis: that checkpoint was trained on a different split, so some of this
+  validation set is in its training data, and its 0.4585 on the common pass is
+  reported for completeness only.
 
   For how large the effect can be, see [section 9](#9-flat-mlp-ablation): that
   ablation was first run at `--num-workers 4` and had to be discarded, because
