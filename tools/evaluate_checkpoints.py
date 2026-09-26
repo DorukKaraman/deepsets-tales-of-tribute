@@ -241,10 +241,14 @@ def load_checkpoint(path):
 # --------------------------------------------------------------------------
 
 def iter_samples(data_dir, limit):
-    """Streams (outcome, graph) from every *.jsonl.gz under data_dir, in sorted
-    shard order. Deterministic and unshuffled on purpose: every metric here is
-    order-independent, and a fixed order is what makes two invocations of this
-    script directly comparable."""
+    """Streams (outcome, game_id, graph) from every *.jsonl.gz under data_dir,
+    in sorted shard order. Deterministic and unshuffled on purpose: every metric
+    here is order-independent, and a fixed order is what makes two invocations
+    of this script directly comparable.
+
+    game_id rides along because states within one game are highly correlated
+    and any honest significance test has to cluster on it -- see
+    tools/clustered_significance.py, which consumes --per-state-out."""
     shards = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl.gz"), recursive=True))
     if not shards:
         raise FileNotFoundError(f"No *.jsonl.gz shards found under {data_dir}")
@@ -264,7 +268,7 @@ def iter_samples(data_dir, limit):
                 try:
                     row = json.loads(line)
                     graph = json_to_pyg_graph(row["data"]["state"])
-                    yield int(row["outcome"]), graph
+                    yield int(row["outcome"]), row.get("game_id", ""), graph
                     n += 1
                 except Exception as e:
                     skipped += 1
@@ -275,8 +279,8 @@ def iter_samples(data_dir, limit):
 
 
 def collate(batch):
-    xs = [g.x for _, g in batch]
-    us = [g.u for _, g in batch]
+    xs = [g.x for _, _, g in batch]
+    us = [g.u for _, _, g in batch]
     batch_index = torch.cat([torch.full((x.shape[0],), i, dtype=torch.long)
                              for i, x in enumerate(xs)])
     return torch.cat(xs, dim=0), batch_index, len(batch), torch.cat(us, dim=0)
@@ -334,7 +338,18 @@ def main():
                              "model still sees the same samples.")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--json-out", default=None, help="Also write the metrics to this JSON file")
+    parser.add_argument("--per-state-out", default=None, metavar="PATH.csv.gz",
+                        help="Also write one gzipped CSV row per scored state: game_id, "
+                             "target, prestige_clock, bucket, and each checkpoint's "
+                             "predicted probability. Written streaming, so memory does not "
+                             "grow with the dataset. This is the input to "
+                             "tools/clustered_significance.py, which needs game_id to "
+                             "cluster on -- the aggregate metrics above cannot support a "
+                             "significance claim on their own.")
     args = parser.parse_args()
+    if args.per_state_out and not args.per_state_out.endswith(".gz"):
+        sys.exit("ERROR: --per-state-out must end in .gz (the file is written gzipped; "
+                 "one row per state is large).")
 
     torch.set_grad_enabled(False)
     # Metrics must not depend on how many cores happen to be free.
@@ -365,29 +380,55 @@ def main():
     batch = []
     n_scored = 0
 
+    # Per-state rows are written as each batch is scored and never accumulated,
+    # so memory stays flat whatever the dataset size. Probabilities go out at
+    # 10 significant digits: float32 carries ~7, so nothing is lost, and
+    # tools/clustered_significance.py recomputes losses from these numbers and
+    # must land on the same p-values as scoring in-process.
+    per_state = None
+    if args.per_state_out:
+        per_state = gzip.open(args.per_state_out, "wt", newline="")
+        per_state.write(",".join(
+            ["game_id", "target", "prestige_clock", "bucket"]
+            + [f"p_{n}" for n in models]) + "\n")
+
     def flush(batch):
         nonlocal n_scored
         if not batch:
             return
         x, batch_index, num_graphs, u = collate(batch)
-        for entry in models.values():
-            entry["logits"].append(entry["model"](x, batch_index, num_graphs, u).numpy())
-        for outcome, graph in batch:
+        batch_logits = {}
+        for name, entry in models.items():
+            lg = entry["model"](x, batch_index, num_graphs, u).numpy()
+            entry["logits"].append(lg)
+            batch_logits[name] = lg
+        for i, (outcome, game_id, graph) in enumerate(batch):
+            clock = float(graph.u[0, PRESTIGE_CLOCK_GLOBAL_INDEX])
             labels.append(float(outcome))
-            clocks.append(float(graph.u[0, PRESTIGE_CLOCK_GLOBAL_INDEX]))
+            clocks.append(clock)
+            if per_state is not None:
+                probs = [1.0 / (1.0 + np.exp(-float(batch_logits[n][i])))
+                         for n in models]
+                per_state.write(
+                    f"{game_id},{int(outcome)},{clock:.10g},"
+                    f"{bucket_index(clock)},"
+                    + ",".join(f"{p:.10g}" for p in probs) + "\n")
         n_scored += len(batch)
         if n_scored % (args.batch_size * 20) == 0:
             print(f"  ... {n_scored} samples scored")
 
     try:
-        for outcome, graph in iter_samples(args.data_dir, args.limit):
-            batch.append((outcome, graph))
+        for outcome, game_id, graph in iter_samples(args.data_dir, args.limit):
+            batch.append((outcome, game_id, graph))
             if len(batch) >= args.batch_size:
                 flush(batch)
                 batch = []
         flush(batch)
     except FileNotFoundError as e:
         sys.exit(f"ERROR: {e}")
+    finally:
+        if per_state is not None:
+            per_state.close()
 
     if n_scored == 0:
         sys.exit("ERROR: no samples were scored -- is --data-dir the right directory?")

@@ -1189,9 +1189,19 @@ magnitude and is reported here only to show how far off it is.
 
 So: **significant on loss, suggestive on accuracy.** Loss is continuous rather
 than thresholded, carries more information per sample, and is the metric
-`best_model.pth` is selected on; p = 0.0071 survives Bonferroni across the three
-comparisons (0.021). Accuracy at p = 0.086 is a consistent direction — DeepSets
-is better in 52 of 76 games — not a demonstrated difference.
+`best_model.pth` is selected on; p = 0.0071 survives Bonferroni over all six
+tests in the table (three pairs × two metrics), at p_adj = 0.0425. Accuracy at
+p = 0.086 is a consistent direction — DeepSets is better in 52 of the 74 games
+where the two differ — not a demonstrated difference.
+
+Every figure in that table is reproduced by the committed tooling, which is why
+the per-state file exists:
+
+```bash
+python tools/evaluate_checkpoints.py A.pth B.pth C.pth \
+    --data-dir "$SPLIT/val" --per-state-out scores.csv.gz
+python tools/clustered_significance.py scores.csv.gz
+```
 
 **Capacity is not what the flat model lacks.** 22.57× the parameters moves
 accuracy by +0.12 points (p = 0.45) and loss by +0.001 (p = 0.90), in the wrong

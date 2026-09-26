@@ -42,12 +42,34 @@
 #      refuses to run if any are left.
 #   5. sbatch scripts/slurm_train.sh
 #
-# AFTERWARDS, each seed leaves:
+# WHICH NETWORK, AND WHERE IT LANDS. Two environment variables, both with
+# today's behaviour as their default, so an unchanged submission is unchanged:
+#
+#   ARCH=deepsets   (default) train_local.py + export_to_onnx.py
+#   ARCH=matched              train_flat.py --arch matched + export_flat_to_onnx.py
+#   ARCH=wide                 train_flat.py --arch wide    + export_flat_to_onnx.py
+#   OUT_ROOT=...    (default $HPCWORK/tot_models)
+#
+# matched and wide are the flat-MLP ablation (REPRODUCE.md section 9). Give
+# them their own OUT_ROOT -- the default directory holds the paper's per-seed
+# models, and the output path depends only on the array index, so an ablation
+# run at --seed 0 would otherwise land on top of seed_00:
+#
+#   ARCH=matched OUT_ROOT="$HPCWORK/tot_ablation/matched" sbatch scripts/slurm_train.sh
+#   ARCH=wide    OUT_ROOT="$HPCWORK/tot_ablation/wide"    sbatch scripts/slurm_train.sh
+#
+# The script refuses to start if the target seed directory already holds a
+# best_model.pth. FORCE=1 overrides that; nothing else does.
+#
+# AFTERWARDS, each seed leaves (paths shown for the default OUT_ROOT):
 #   $HPCWORK/tot_models/seed_NN/best_model.pth
 #   $HPCWORK/tot_models/seed_NN/deepsets_value_network_epochK.pth
+#     (flat arms: flat_matched_value_network_epochK.pth / flat_wide_...)
 #   $HPCWORK/tot_models/seed_NN/training_metrics.json
-#   $HPCWORK/tot_models/seed_NN/run_config.json        (seed + hyperparameters)
+#   $HPCWORK/tot_models/seed_NN/run_config.json        (seed + hyperparameters,
+#     plus arch/widths/input dim on the flat arms)
 #   $HPCWORK/tot_models/seed_NN/DeepSetsValueNetwork_seed_NN.onnx
+#     (flat arms: FlatValueNetwork_<arch>_seed_NN.onnx)
 #   $HPCWORK/tot_models/seed_NN/SHA256SUMS
 #
 # Then, to use a seed's model in an experiment: add its ONNX sha256 to the
@@ -77,7 +99,17 @@ DATA_DIR="CHANGE_ME_SPLIT_DATA_DIR"    # tools/split_dataset.py output: contains
 
 # --- Have real defaults; edit if you want different ones ---
 VENV_DIR="${SOT_VENV_DIR:-$HPCWORK/tot_venv}"
-OUT_ROOT="$HPCWORK/tot_models"
+# ARCH selects which network this array trains. The default reproduces what
+# this script has always done, so an unchanged submission behaves unchanged.
+#   deepsets  training/train_local.py    + training/export_to_onnx.py
+#   matched   training/train_flat.py     + training/export_flat_to_onnx.py  (72,549 params)
+#   wide      training/train_flat.py     + training/export_flat_to_onnx.py  (1,649,409 params)
+# matched/wide are the flat-MLP ablation -- see REPRODUCE.md section 9.
+ARCH="${ARCH:-deepsets}"
+# OUT_ROOT is overridable so the ablation does not write into the directory
+# holding the paper's per-seed models. Send it somewhere of its own:
+#   ARCH=matched OUT_ROOT="$HPCWORK/tot_ablation/matched" sbatch scripts/slurm_train.sh
+OUT_ROOT="${OUT_ROOT:-$HPCWORK/tot_models}"
 EPOCHS=3            # what the shipped model used
 BATCH_SIZE=256      # what the shipped model used
 LR=5e-4             # what the shipped model used
@@ -108,9 +140,45 @@ if [ -z "${HPCWORK:-}" ]; then
   exit 1
 fi
 
+case "$ARCH" in
+  deepsets|matched|wide) ;;
+  *)
+    echo "ERROR: ARCH=$ARCH is not one of: deepsets, matched, wide." >&2
+    exit 1
+    ;;
+esac
+
 SEED="$SLURM_ARRAY_TASK_ID"
 SEED_TAG="$(printf 'seed_%02d' "$SEED")"
 OUT_DIR="$OUT_ROOT/$SEED_TAG"
+
+# REFUSE TO OVERWRITE AN EXISTING TRAINED MODEL.
+#
+# The output path is derived from the array index alone, so two runs with the
+# same index write to the same directory -- and the per-seed models behind the
+# paper's seed benchmark live at $HPCWORK/tot_models/seed_00..04. A rerun at
+# --seed 0, for any reason, silently replaced seed_00's best_model.pth with a
+# different network; nothing warned, and the .onnx beside it would still carry
+# the OLD hash until the export step overwrote that too. The result is a
+# directory whose contents no longer match the hashes in
+# experiments/configs/seed_benchmark.json, discoverable only by re-running
+# sha256sum.
+#
+# This risk predates the ablation and is not specific to it. FORCE=1 is the
+# deliberate override; there is no automatic one.
+if [ -f "$OUT_DIR/best_model.pth" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "ERROR: $OUT_DIR/best_model.pth already exists." >&2
+  echo "       This directory holds a trained model. Overwriting it would replace a" >&2
+  echo "       checkpoint that something may depend on -- the per-seed models under" >&2
+  echo "       \$HPCWORK/tot_models are pinned by hash in" >&2
+  echo "       experiments/configs/seed_benchmark.json." >&2
+  echo >&2
+  echo "       Either point OUT_ROOT somewhere else:" >&2
+  echo "         ARCH=$ARCH OUT_ROOT=\"\$HPCWORK/tot_ablation/$ARCH\" sbatch \$0" >&2
+  echo "       or, if you really mean to replace it, set FORCE=1." >&2
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 
 # Keep every scratch file off /tmp too -- pip, torch extensions and matplotlib
@@ -150,16 +218,29 @@ for sub in train val; do
 done
 
 echo
-echo "=== Training (seed $SEED) ==="
-python "$REPO_ROOT/training/train_local.py" \
-  --train-dir "$DATA_DIR/train" \
-  --val-dir "$DATA_DIR/val" \
-  --epochs "$EPOCHS" \
-  --batch-size "$BATCH_SIZE" \
-  --lr "$LR" \
-  --num-workers "$NUM_WORKERS" \
-  --seed "$SEED" \
-  --out-dir "$OUT_DIR"
+echo "=== Training (arch $ARCH, seed $SEED) ==="
+if [ "$ARCH" = "deepsets" ]; then
+  python "$REPO_ROOT/training/train_local.py" \
+    --train-dir "$DATA_DIR/train" \
+    --val-dir "$DATA_DIR/val" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --num-workers "$NUM_WORKERS" \
+    --seed "$SEED" \
+    --out-dir "$OUT_DIR"
+else
+  python "$REPO_ROOT/training/train_flat.py" \
+    --arch "$ARCH" \
+    --train-dir "$DATA_DIR/train" \
+    --val-dir "$DATA_DIR/val" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --num-workers "$NUM_WORKERS" \
+    --seed "$SEED" \
+    --out-dir "$OUT_DIR"
+fi
 
 BEST_MODEL="$OUT_DIR/best_model.pth"
 if [ ! -f "$BEST_MODEL" ]; then
@@ -167,13 +248,20 @@ if [ ! -f "$BEST_MODEL" ]; then
   exit 1
 fi
 
-ONNX_OUT="$OUT_DIR/DeepSetsValueNetwork_${SEED_TAG}.onnx"
 echo
 echo "=== Exporting to ONNX ==="
-# export_to_onnx.py verifies the exported graph against the PyTorch model across
-# a range of node counts and refuses to write one whose outputs differ by more
-# than 1e-5, so a silent export bug cannot reach the benchmark.
-( cd "$REPO_ROOT/training" && python export_to_onnx.py --checkpoint "$BEST_MODEL" --out "$ONNX_OUT" )
+# Both exporters verify the exported graph against the PyTorch model across a
+# range of node counts, under a combined atol+rtol tolerance, and write to a
+# temp file that is only renamed into place once it passes -- so a silent
+# export bug cannot reach the benchmark, and a failed export cannot leave an
+# unverified .onnx behind.
+if [ "$ARCH" = "deepsets" ]; then
+  ONNX_OUT="$OUT_DIR/DeepSetsValueNetwork_${SEED_TAG}.onnx"
+  ( cd "$REPO_ROOT/training" && python export_to_onnx.py --checkpoint "$BEST_MODEL" --out "$ONNX_OUT" )
+else
+  ONNX_OUT="$OUT_DIR/FlatValueNetwork_${ARCH}_${SEED_TAG}.onnx"
+  ( cd "$REPO_ROOT/training" && python export_flat_to_onnx.py --arch "$ARCH" --checkpoint "$BEST_MODEL" --out "$ONNX_OUT" )
+fi
 
 echo
 echo "=== Recording hashes ==="
