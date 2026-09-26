@@ -380,8 +380,18 @@ is what it is for.
 The spread is also **tighter than the ±0.02 run-to-run variation measured in
 August**, and the two are not measuring the same thing: the August figure
 predates the shuffle-buffer seeding fix, so it mixed genuine seed-to-seed
-variation with nondeterministic data ordering. The 0.005 here is the former
-alone, which is the quantity that belongs next to a mean.
+variation with nondeterministic data ordering.
+
+**Both figures are weaker than they look, and for the same reason.** Every val
+loss on this page was computed through a DataLoader that did not partition
+shards across workers, so each run validated on a different resampled multiset
+of `val/` — see
+[Known limitations](#known-limitations). The 0.005 spread across the seeds and
+the ±0.02 August noise floor therefore both mix model variance with sampling
+variance, and neither is a clean measure of the quantity it names. Re-scoring
+all six checkpoints on one common set with `tools/evaluate_checkpoints.py`,
+which is single-process and unaffected, is what would separate them; that is
+pending and has to run on the cluster against the full split's `val/`.
 
 **We do not have the shipped model's training metrics.** The run that produced
 it (8 August 2026) left only the checkpoint and the exported ONNX behind; no
@@ -1249,44 +1259,69 @@ p = 0.086 into an answer.
   [Which numbers come from where](#which-numbers-come-from-where).
 - **The shipped model's training metrics and wall-clock cost were not
   recorded.** Only the checkpoint and the exported ONNX survive from that run.
-- **`training/stream_dataset.py` does not partition shards across DataLoader
-  workers, so every `--num-workers > 0` run reads a random sub-multiset of the
-  data.** Each worker shuffles the shard list with *its own* RNG state and then
-  takes `shards[worker_id::num_workers]` — slices of different permutations,
-  which is not a partition. Measured on an 8-shard validation directory: at two
-  workers, three shards were read twice and three were never read (18,667
-  records streamed where the directory holds 20,138); at four workers, one shard
-  was read three times and three were never read (17,515 records).
+- **The shipped model and the five seed models were each trained on a
+  non-uniform subset of the shards, a different one every epoch.**
+  `training/stream_dataset.py` shuffled the shard list with each worker's *own*
+  RNG state and then took `shards[worker_id::num_workers]`. Slices of different
+  permutations are not a partition, so in any given epoch some shards were read
+  by several workers and others by none.
 
-  This is **not fixed**, because it affects the pipeline that produced the
-  shipped model and all five seed models, and what to re-run is a judgement
-  call. The fix is to partition before shuffling rather than after:
+  **This is fixed** — the current code partitions first and shuffles within each
+  worker's own share, and `tools/test_stream_dataset_sharding.py` is the
+  regression test (it fails on the old strategy at every worker count ≥ 2 and
+  passes on the new one). The models were not retrained, so the figures below
+  describe the runs that produced the artefacts this repo ships.
 
-  ```python
-  worker_shards = self.shards[worker_id::num_workers]   # deterministic partition
-  random.shuffle(worker_shards)                         # per-worker order only
-  ```
+  Measured over the real 128-shard training corpus, 400 simulated runs using
+  the DataLoader's own seeding path, verified against a live multi-worker
+  loader:
 
-  Two consequences for numbers already in this file. **Every `best_val_loss` in
-  a `run_config.json` was computed on a resampled validation multiset**, drawn
-  differently per run, so the five seed models' 0.4385 / 0.4369 / 0.4402 /
-  0.4329 / 0.4470 mix model variance with sampling variance — which bears on
-  calling seed 3 the best and seed 4 the worst in
-  [section 3](#several-seeds-on-the-cluster). Re-scoring the six checkpoints
-  with `tools/evaluate_checkpoints.py` would settle that without retraining
-  anything, since that tool streams single-process and is unaffected. And
-  **training saw a different subsample each epoch**, missing a substantial
-  fraction of shards at the cluster's `--num-workers 7`.
+  | configuration | missed/epoch | duplicated/epoch | distinct/epoch | never in 3 epochs |
+  |---|---|---|---|---|
+  | `--num-workers 4` — shipped model, 8 Aug | 31.7% ±2.6 | 26.2% ±2.3 | 68.3% | 3.1% ±1.4 |
+  | `--num-workers 7` — cluster seed runs | 33.9% ±2.6 | 26.3% ±2.1 | 66.1% | 4.0% ±1.5 |
 
-  The effect is not small. The flat-MLP ablation in
-  [section 9](#9-flat-mlp-ablation) was first run at `--num-workers 4` and had
-  to be discarded: the three arms drew *different* shard multisets, because the
-  DataLoader seeds its workers from the main-process RNG after model
-  construction and the three architectures consume different amounts of it. That
-  run put the DeepSets-vs-flat loss gap at 0.103; the clean `--num-workers 0`
-  re-run puts it at 0.054. The bug had inflated the apparent advantage roughly
-  twofold, in the direction that would have flattered the paper's own
-  architecture.
+  Four was `train_local.py`'s `--num-workers` default at the shipped model's
+  training commit; seven is `scripts/slurm_train.sh`'s `CPUS_PER_TASK - 1`. Each
+  worker picked a given shard independently with probability `1/nw`, so the miss
+  rate is `(1 - 1/nw)^nw` — 0.3164 and 0.3399, tending to `1/e`. The measurement
+  lands on those values, which is what identifies the mechanism rather than just
+  the symptom.
+
+  **This does not affect any win rate.** Every benchmark in
+  [section 7](#7-paper-experiments) plays the models as they are, against
+  opponents, and measures what they do. A model trained on two-thirds of the
+  shards per epoch is simply the model that exists; its 79.3% is its 79.3%. The
+  same holds for the seed benchmark, the alpha sweep, the time scaling and both
+  equal-effort directions. Nothing in those results is contingent on how the
+  training data was sampled.
+
+  **It does affect every recorded validation loss**, because validation ran
+  through the same loader: the seed table above, the 0.4058/0.4437 comparison,
+  the architecture probes, the 0.4034 attached to
+  `ablation_heuristic_only.pth`, and the ±0.02 run-to-run noise floor measured
+  in August were each computed on a *resampled* validation multiset, drawn
+  differently per run. They are not wrong so much as not mutually comparable —
+  a difference between two of them mixes model variance with sampling variance
+  in unknown proportion. That bears directly on calling seed 3 the best and seed
+  4 the worst, and on the ±0.02 noise floor, which was in part measuring this.
+
+  **Re-scored figures on one common set are pending, and must run on the
+  cluster.** `tools/evaluate_checkpoints.py` streams single-process and is
+  unaffected, so scoring all six checkpoints on the full split's `val/` settles
+  it without retraining anything. It cannot be done locally: the only local
+  validation set belongs to [section 9](#9-flat-mlp-ablation)'s subset, which
+  was split separately from the full corpus, so its val games may appear in the
+  shipped and seed models' *training* games.
+
+  For how large the effect can be, see [section 9](#9-flat-mlp-ablation): that
+  ablation was first run at `--num-workers 4` and had to be discarded, because
+  the three arms drew *different* shard multisets — the DataLoader seeds its
+  workers from the main-process RNG after model construction, and the three
+  architectures consume different amounts of it. That run put the
+  DeepSets-versus-flat loss gap at 0.103; the clean re-run puts it at 0.054. The
+  bug had inflated the apparent advantage roughly twofold, in the direction that
+  flattered this paper's own architecture.
 - **Byte-identical ONNX export requires PyTorch 2.2.2.** The model itself
   reproduces exactly on any version; only the file hash does not.
 - **Training data is not distributed** (several GB) and regenerates only
