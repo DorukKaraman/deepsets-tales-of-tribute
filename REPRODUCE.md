@@ -880,14 +880,65 @@ config failed exactly here; see
 `_first_run_was_invalid`, and the paired experiment it accidentally produced,
 below.)
 
-| Model | Win rate | 95% CI | as P1 | as P2 | evals/turn | val loss |
-|---|---|---|---|---|---|---|
-| seed 0 | 75.00% | 70.5–79.0 | 84.5% | 65.5% | 5,986 | 0.4385 |
-| seed 1 | 75.00% | 70.5–79.0 | 83.0% | 67.0% | 5,865 | 0.4369 |
-| seed 2 | 78.00% | 73.7–81.8 | 83.5% | 72.5% | 5,771 | 0.4402 |
-| seed 3 | 76.00% | 71.6–79.9 | 86.0% | 66.0% | 6,207 | 0.4329 |
-| seed 4 | 69.25% | 64.6–73.6 | 82.0% | 56.5% | 6,921 | 0.4470 |
-| **shipped** | **80.25%** | 76.1–83.9 | 85.5% | 75.0% | 6,401 | — |
+| Model | Win rate | 95% CI | as P1 | as P2 | evals/turn | val loss | val acc |
+|---|---|---|---|---|---|---|---|
+| seed 0 | 75.00% | 70.5–79.0 | 84.5% | 65.5% | 5,986 | **0.4343** | 78.24% |
+| seed 1 | 75.00% | 70.5–79.0 | 83.0% | 67.0% | 5,865 | 0.4419 | 78.06% |
+| seed 2 | 78.00% | 73.7–81.8 | 83.5% | 72.5% | 5,771 | 0.4437 | 77.95% |
+| seed 3 | 76.00% | 71.6–79.9 | 86.0% | 66.0% | 6,207 | 0.4452 | 78.02% |
+| seed 4 | 69.25% | 64.6–73.6 | 82.0% | 56.5% | 6,921 | 0.4396 | **78.28%** |
+| **shipped** | **80.25%** | 76.1–83.9 | 85.5% | 75.0% | 6,401 | 0.4497 | 77.54% |
+
+The val columns are the **re-scored** ones — all six checkpoints on the full
+validation split, 308,809 states, one pass, byte-identical samples:
+
+| Model | loss | accuracy | AUC | Brier |
+|---|---|---|---|---|
+| shipped | 0.4497 | 77.54% | 0.8714 | 0.1491 |
+| seed 0 | **0.4343** | 78.24% | 0.8764 | **0.1441** |
+| seed 1 | 0.4419 | 78.06% | 0.8745 | 0.1459 |
+| seed 2 | 0.4437 | 77.95% | 0.8735 | 0.1467 |
+| seed 3 | 0.4452 | 78.02% | 0.8753 | 0.1468 |
+| seed 4 | 0.4396 | **78.28%** | **0.8779** | 0.1448 |
+| *(majority baseline)* | — | *50.58%* | — | — |
+
+`ablation_heuristic_only.pth` scores 0.4585 / 76.61% on the same pass, but that
+number is **not clean**: it was trained on a different split, so some of these
+validation games may be in its training set. It is listed for completeness and
+should not be compared with the rows above.
+
+```bash
+python tools/evaluate_checkpoints.py models/deepsets_value_network.pth \
+    "$HPCWORK"/tot_models/seed_0*/best_model.pth --data-dir "$SPLIT/val"
+```
+
+**The ranking changed completely when the loader was fixed.** The val losses
+previously recorded here came from the resampled multiset the buggy DataLoader
+produced (see [Known limitations](#known-limitations)): 0.4385 / 0.4369 /
+0.4402 / 0.4329 / 0.4470, which made seed 3 the best of the five and seed 4 the
+worst. On the full set, scored properly, **seed 3 is the worst of the five and
+seed 4 is second best**. The two orderings have Spearman ρ = −0.50 — the old
+ranking was not a noisy version of the right one, it was unrelated to it. Any
+statement that rested on those numbers has to be re-derived, not merely
+re-checked.
+
+**The offline ranking does not predict playing strength.** Two inversions are
+visible in the joined table above:
+
+- **the shipped model is last of the six on every offline metric** — highest
+  loss, lowest accuracy, lowest AUC, highest Brier — **and has the highest win
+  rate**, 80.25%;
+- **seed 4 is best on accuracy and AUC** and is **the weakest player** of the
+  six at 69.25%.
+
+State this modestly. Six models, offline losses spanning 0.0154 and accuracies
+spanning 0.74 points, against win rates carrying ±2.2 points of binomial noise
+each: rank statistics on that are not stable, and a single swap would move them
+a long way. The claim supported here is that **the offline ranking is
+uninformative about playing strength on this evidence, and is inverted in two
+specific cases** — not that the two are anticorrelated. What it does establish
+is that picking a checkpoint by validation loss is not a substitute for playing
+it, which is the reason the seed benchmark exists as a separate experiment.
 
 Seed mean **74.65%**, SD **3.26** points against binomial noise of ~2.17 points
 per row. Homogeneity across the five seeds: χ² ≈ 9.0, df 4, **p ≈ 0.06** — so
@@ -1160,108 +1211,218 @@ was built.
 
 ### Accuracy
 
-Subset run: 760 games split game-aware 90/10 into 175,739 train / 20,138 val
-states, three epochs, `--seed 0`, all three arms on the identical split. The
-DeepSets row is a **control trained here**, not the shipped model — 0.4034 was
-measured on a different validation set and is not comparable. All three were
-scored in one pass by `tools/evaluate_checkpoints.py`, so the samples are
-byte-identical across models.
+Full corpus, on the cluster: the same 90/10 game-aware split every other model
+in this document was trained on, three epochs, `--seed 0`, all three arms
+identical apart from the network. The DeepSets row is a **control trained
+here**, not the shipped model, so that all three share a split, a seed, a loop
+and a loader.
 
-| model | loss | acc | AUC | Brier |
-|---|---|---|---|---|
-| DeepSets control | **0.5016** | **75.57%** | **0.8411** | **0.1655** |
-| flat-matched | 0.5556 | 73.17% | 0.8072 | 0.1821 |
-| flat-wide | 0.5687 | 73.29% | 0.8115 | 0.1847 |
-| majority baseline | — | 50.28% | — | — |
+Validation loss by epoch, best in bold:
 
-**Test the clustered numbers, not the sample-level ones.** Val holds 20,138
-states across 76 games, ~265 states per game, and states within a game are
-highly correlated. A sample-level McNemar treats them as independent and returns
-p = 2×10⁻¹⁴ for the accuracy difference; the same difference clustered by game
-returns p = 0.086. The sample-level figure is wrong by twelve orders of
-magnitude and is reported here only to show how far off it is.
+| arm | epoch 1 | epoch 2 | epoch 3 |
+|---|---|---|---|
+| deepsets | 0.4348 | **0.4290** | 0.4304 |
+| matched | 0.4727 | **0.4635** | 0.4723 |
+| wide | **0.5325** | 0.5562 | 0.5848 |
 
-| comparison | Δ accuracy | clustered t(75) | Δ loss | clustered t(75) |
-|---|---|---|---|---|
-| DeepSets − flat-matched | +2.40 pts | t = +1.74, p = 0.086 | −0.0553 | **t = −2.77, p = 0.0071** |
-| DeepSets − flat-wide | +2.28 pts | t = +1.33, p = 0.189 | −0.0564 | **t = −2.73, p = 0.0080** |
-| flat-wide − flat-matched | +0.12 pts | t = +0.75, p = 0.454 | +0.0010 | t = +0.12, p = 0.902 |
+All three then scored in one pass on the full validation split — 308,809
+states, byte-identical samples, majority baseline 50.58%:
 
-So: **significant on loss, suggestive on accuracy.** Loss is continuous rather
-than thresholded, carries more information per sample, and is the metric
-`best_model.pth` is selected on; p = 0.0071 survives Bonferroni over all six
-tests in the table (three pairs × two metrics), at p_adj = 0.0425. Accuracy at
-p = 0.086 is a consistent direction — DeepSets is better in 52 of the 74 games
-where the two differ — not a demonstrated difference.
+| arm | parameters | loss | accuracy | AUC | Brier |
+|---|---|---|---|---|---|
+| **deepsets** | 73,089 | **0.4290** | **78.65%** | **0.8800** | **0.1419** |
+| matched | 72,549 | 0.4635 | 76.73% | 0.8606 | 0.1533 |
+| wide | 1,649,409 | 0.5325 | 75.83% | 0.8520 | 0.1670 |
 
-Every figure in that table is reproduced by the committed tooling, which is why
-the per-state file exists:
+**DeepSets wins all sixteen cells**: best of the three on loss, accuracy, AUC
+and Brier, in every one of the four prestige-clock buckets, without exception.
+
+| bucket | n | loss (ds / matched / wide) | accuracy (ds / matched / wide) |
+|---|---|---|---|
+| [0.00, 0.25) | 130,784 | 0.5643 / 0.5876 / 0.6453 | 69.63% / 67.65% / 66.68% |
+| [0.25, 0.50) | 64,605 | 0.4346 / 0.4761 / 0.5414 | 80.33% / 77.93% / 76.80% |
+| [0.50, 0.75) | 51,465 | 0.3313 / 0.3735 / 0.4633 | 85.08% / 83.74% / 83.12% |
+| [0.75, inf) | 61,955 | 0.2187 / 0.2629 / 0.3429 | 90.59% / 88.82% / 88.07% |
+
+Game-clustered paired tests over the 1,216 validation games, Bonferroni ×4 —
+**all four significant**, and not marginally:
+
+| comparison | metric | mean diff | SE | t(1215) | p | games better |
+|---|---|---|---|---|---|---|
+| deepsets − matched | loss | −0.0293 | 0.0039 | −7.61 | < 1e-9 | 798/1216 |
+| deepsets − matched | accuracy | +1.83 pts | 0.28 | +6.47 | < 1e-9 | 699/1118 |
+| deepsets − wide | loss | −0.0862 | 0.0064 | −13.48 | < 1e-9 | 799/1216 |
+| deepsets − wide | accuracy | +2.92 pts | 0.33 | +8.90 | < 1e-9 | 772/1159 |
 
 ```bash
-python tools/evaluate_checkpoints.py A.pth B.pth C.pth \
-    --data-dir "$SPLIT/val" --per-state-out scores.csv.gz
-python tools/clustered_significance.py scores.csv.gz
+python tools/clustered_significance.py --baseline deepsets ablation_per_state.csv.gz
 ```
 
-**Capacity is not what the flat model lacks.** 22.57× the parameters moves
-accuracy by +0.12 points (p = 0.45) and loss by +0.001 (p = 0.90), in the wrong
-direction on loss. `wide` also overfits hard, val loss 0.5693 → 0.7509 → 1.0097
-across three epochs while train accuracy climbs. The objection that the matched
-model was starved into losing does not survive this row, which is the only
+**For scale: the loss gap to `matched` is about 2.7× the entire spread across
+the five DeepSets training seeds** (0.0293 against 0.0109 from seed 0's 0.4343
+to seed 3's 0.4452). The architecture difference is comfortably larger than the
+seed noise it would have to clear.
+
+**Capacity still does not close the gap — it widens it.** `wide` has 22.57× the
+parameters of `matched` and is worse on every metric and in every bucket, and
+its validation loss rises monotonically across all three epochs (0.5325 →
+0.5562 → 0.5848) while it keeps fitting the training set. The starvation
+objection to the matched arm does not survive this row, which is the only
 reason it was run.
 
-**The gap is an early-game gap.**
+Artefacts, all `--seed 0`, `--num-workers 7`, three epochs, batch 256, lr 5e-4:
 
-| prestige bucket | n | DeepSets | flat-matched | gap |
+| arm | ONNX sha256 | best val loss |
+|---|---|---|
+| deepsets | `4619288bd96495270b09b1f1e7a1589dded8481a84bfc12fb2faebd4c6ad464a` | 0.4290 |
+| matched | `bbbccfb7b060b2390cc4e02c865d150c72e19d253c4e89cf4fcf79422fa40071` | 0.4635 |
+| wide | `26c396d87dee943273501504482ef1f260fd0bec1661ec239a0c3dc6b0806db8` | 0.5325 |
+
+**Memory: the DeepSets arm peaked at 19.3 GB in epoch 3, so `--mem=24G` is the
+right allocation and 16 GB is not.** The shuffle buffer dominates
+(`DEFAULT_SHUFFLE_BUFFER_SIZE = 100,000` parsed graphs, per worker), so this
+scales with that constant and the worker count rather than with the dataset.
+
+One operational note for anyone repeating the scoring step:
+`tools/evaluate_checkpoints.py` was **OOM-killed** on the first attempt at
+scoring all three arms over the full 308,809-state split, and had to be re-run
+with more memory. Measured locally, its resident set grows quickly and then
+plateaus at roughly 0.6 GB for three checkpoints — it does not grow linearly
+with the number of states — so this is an allocation to request explicitly, not
+a leak to work around. The per-state CSV writer streams and contributes
+nothing to it.
+
+#### The subset pilot
+
+Before the cluster run, the same three arms were trained locally on a 760-game
+subset (175,739 train / 20,138 val) to decide whether the full run was worth
+the time. It is kept here because it is what the decision was made on, and
+because comparing it with the full run is informative about how far a pilot of
+that size can be trusted.
+
+| arm | subset loss | subset acc | full-corpus loss | full-corpus acc |
 |---|---|---|---|---|
-| [0.00, 0.25) | 9,207 | 67.83% | 63.88% | **+3.95** |
-| [0.25, 0.50) | 3,953 | 74.48% | 73.13% | +1.35 |
-| [0.50, 0.75) | 3,171 | 84.42% | 82.97% | +1.45 |
-| [0.75, inf) | 3,807 | 88.07% | 87.52% | +0.55 |
+| deepsets | 0.5016 | 75.57% | 0.4290 | 78.65% |
+| matched | 0.5556 | 73.17% | 0.4635 | 76.73% |
+| wide | 0.5687 | 73.29% | 0.5325 | 75.83% |
 
-Late states are nearly decided and the prestige clock alone carries most of the
-signal, so architecture barely matters there. Early, where board composition is
-what separates positions, the set encoder pays.
+The pilot got the **ordering** right and the **significance** wrong: its
+DeepSets-versus-matched loss gap was 0.0553 at p = 0.0071, where the full run
+gives 0.0293 at p < 1e-9. The pilot overstated the gap by roughly a factor of
+two on 76 games, and could not resolve the accuracy difference at all
+(p = 0.086 there, p < 1e-9 here). A 6% subset was enough to justify the cluster
+time and not enough to report.
 
 ### Throughput
 
-`tools/compare_onnx_models.py`, 5,000 real states, single-threaded. It needs no
-changes for these models: `export_flat_to_onnx.py` gives the exported graph the
-same `(node_features, global_features)` inputs the DeepSets model takes and does
-the padding *inside* the graph, so the padding cost is inside the measurement
-where a real agent would pay it.
+`tools/compare_onnx_models.py`, 5,000 real validation states, single-threaded,
+**on an x86 compute node** — the hardware the benchmark runs on:
 
-| model | mean µs | median µs | vs DeepSets |
+| model | median µs | mean µs | vs DeepSets |
 |---|---|---|---|
-| DeepSets | 74.9 | 70.7 | — |
-| flat-matched | 51.9 | 49.7 | **1.45× faster** |
-| flat-wide | 197.0 | 195.6 | **2.47× slower** |
+| DeepSets | 49.0 | 49.5 | — |
+| matched | 60.7 | 60.5 | **1.24× slower** |
+| wide | 240.0 | 251.7 | **4.7× slower** |
 
-**The MAC count predicted 14× and delivered 1.45×.** DeepSets runs its node
-encoder once per card — about 1,002,000 MACs at the median 33-node state —
-against the flat model's constant ~72,000. That arithmetic was a hypothesis
-about throughput and it over-predicted by an order of magnitude, because a
-12,691→5 matvec streams 63,455 weights to produce five numbers and is entirely
-memory-bound, while 33 batched 99→128 rows is a shape onnxruntime is good at.
-Arithmetic intensity decides this, not arithmetic. `wide` loses outright: 6.6 MB
-of weights is past useful cache residency.
+(The DeepSets column is measured afresh in each pairing; it reads 49.0 µs
+against `matched` and 51.0 µs against `wide`.)
 
-These are Apple Silicon numbers (M1, x86_64 Python under Rosetta). The denormal
-caveat in [section 4](#denormal-flushing-and-why-the-export-is-platform-dependent)
-does not apply — none of these models carry subnormal weights — but GEMM-shape
-efficiency is host-specific, so re-measure on the cluster before quoting a ratio.
+**Do not quote the local figures.** An earlier measurement of the same three
+files on an Apple M1, with the pinned x86_64 Python under Rosetta, put
+flat-matched at **1.45× faster** than DeepSets. The x86 figure is 1.24× slower.
+Same models, same tool, same states, **opposite conclusion** — the sign of the
+result is a property of the host, not of the architecture. Only the x86 numbers
+above belong in the paper, for the same reason the denormal measurement in
+[section 4](#denormal-flushing-and-why-the-export-is-platform-dependent) does:
+an agent's search rate is whatever the cluster gives it.
 
-### What is not built, and what would settle it
+**The MAC arithmetic failed on both machines.** Counting multiply-accumulates,
+DeepSets runs its node encoder once per card — about 1,002,000 MACs at the
+median 33-node state — against either flat model's constant ~72,000, predicting
+the flat model should be roughly **14× cheaper**. It came out 1.45× faster on
+one host and 1.24× slower on the other. Neither is 14×, and the two do not even
+agree in direction. A 12,691→5 matvec streams 63,455 weights to produce five
+numbers: it is memory-bound, so its arithmetic is nearly free and its loads are
+not, while 33 batched 99→128 rows is a shape onnxruntime handles well.
+Arithmetic intensity decides this, and a MAC count cannot see it. `wide` loses
+for a plainer reason: 1,649,409 weights is 6.6 MB, past any useful cache.
 
-No C# encoder and no bot. Neither is needed yet, and a flat bot may need no C#
-encoder at all: the graph pads internally, so an agent could feed it through the
-unchanged `FeatureExtractor` in `DeepSetsCore.cs`.
+### Most of the flat models' parameters are dead
 
-The open question is the subset. 175,739 training states is ~6% of the corpus,
-the control was **still improving at epoch 3** while both flat models peaked at
-epoch 1, and three epochs may therefore understate DeepSets specifically. A
-full-corpus run on the cluster is what would turn the accuracy result from
-p = 0.086 into an answer.
+The export flush (`|w| < 1e-30`, see
+[section 4](#denormal-flushing-and-why-the-export-is-platform-dependent))
+zeroed:
+
+| arm | parameters | zeroed | % |
+|---|---|---|---|
+| deepsets | 73,089 | 19,119 | 26.2% |
+| matched | 72,549 | 44,872 | **61.9%** |
+| wide | 1,649,409 | 1,201,515 | **72.8%** |
+
+A parameter-matched model with 61.9% of its weights identically zero is not
+really carrying 72,549 parameters. Three mechanisms produce that, and they were
+measured rather than assumed — the obvious explanation turns out to be the
+smallest of them:
+
+**1. Dead features, shared by every architecture.** 43 of the 99 card-feature
+dimensions are never nonzero on any card in the data — card effects that no
+competition card has. **Every architecture zeroes 100% of the weights attached
+to them**, against 4.3% (deepsets) to 18.9% (wide) on live features. The
+per-feature dead pattern correlates r = +0.92 between DeepSets' node encoder
+and the flat models' first layer, and r = +0.998 between the two flat models.
+This is a property of the feature schema, not of flattening.
+
+**2. Per-slot specialisation, unique to flattening.** `json_to_pyg_graph`
+emits cards in a fixed order — tavern, then hand, then played, and so on — so
+each slot only ever holds a narrow band of the feature space, and the flat
+model keeps a private copy of all 99 weights for every slot. Slot 0 is always a
+tavern card: it uses 1 of the 9 location values, and 88.9% (8/9) of its
+location weights are dead. Slot 20 sees 6 locations and 33.3% (3/9) are dead.
+The dead fraction tracks `(9 − locations used)/9` almost exactly. DeepSets has
+one shared encoder and so pays this once, not 128 times.
+
+**3. Padding, which is real but the smallest of the three.** Dead weights do
+rise with slot emptiness exactly as expected — from 51.1% on slots 0–24
+(occupied in 100% of states) to 92.5% on slots 96–127 (occupied in 0.01%),
+correlation −0.59 between occupancy and deadness. But slots that are *always*
+occupied are already half dead from mechanisms 1 and 2. Holding every slot to
+the always-occupied rate, padding accounts for **13.7 points of matched's
+61.9%** and 19.4 of wide's 72.8%.
+
+The amplifier behind all three is structural: **the flat model spends 87.5% of
+its parameter budget on the input layer** (63,455 of 72,549), where input
+sparsity bites, while DeepSets spends 17% there (12,672 of 73,089) and reuses
+that layer across every card. The same per-feature death rate therefore costs
+the flat model five times as much of its budget.
+
+What this means for the comparison, stated carefully:
+
+- **"Parameter-matched" means matched by count.** Both models were given ~73,000
+  weights; they are not carrying equivalent effective capacity, and the flat
+  model's shortfall is not an artefact of how it was initialised or trained.
+- **Much of the flat model's allocated capacity serves inputs that are usually
+  empty**, because a fixed-size encoding must budget for the largest state and
+  then carry that space through every ordinary one — 74% of the input vector is
+  padding at the median state.
+- **This is the cost of padding, not a flaw in the comparison.** It is what
+  flattening a variable-size set actually costs, and a fixed-size encoder
+  cannot avoid it. Reporting the models as parameter-matched and then noting
+  that the flat model cannot use its match is the honest description.
+- **More capacity does not close the gap.** The `wide` arm has 22.57× the
+  parameters, 72.8% of them dead, and loses by more than `matched` does on
+  every metric. Whatever the flat model is missing, it is not budget.
+
+### What is not built
+
+No C# encoder and no bot. A flat bot would need no new encoder: the exported
+graph takes the same `(node_features, global_features)` inputs as the DeepSets
+model and pads internally, so `DeepSetsCore.cs` can load any of the three
+unchanged — verified on signature, dtype, output name and scale.
+[`experiments/configs/ablation_benchmark.json`](experiments/configs/ablation_benchmark.json)
+is ready to run that comparison in games, which is the test that matters given
+that the offline ranking of the seed models
+[did not predict their playing strength](#seed-benchmark-results).
+
 
 ## Known limitations
 

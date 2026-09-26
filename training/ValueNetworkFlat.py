@@ -47,24 +47,26 @@ roughly 14x fewer at the median. That was a reason to EXPECT the flat model to
 be faster. It was not a measurement, and it was wrong about the size of the
 effect.
 
-Measured (tools/compare_onnx_models.py, 5,000 real states, single-threaded):
+MEASURED ON x86 (tools/compare_onnx_models.py, 5,000 real states,
+single-threaded, on a compute node -- the hardware the benchmark runs on):
 
-    DeepSets         74.9 us mean,  70.7 us median
-    flat-matched     51.9 us mean,  49.7 us median     1.45x FASTER
-    flat-wide       197.0 us mean, 195.6 us median     2.47x SLOWER
+    DeepSets         49.0 us median
+    flat-matched     60.7 us median     1.24x SLOWER
+    flat-wide       240.0 us median     4.7x  SLOWER
 
-So a 14x MAC advantage becomes 1.45x wall clock. The gap is the point: a
-12,691->5 matvec streams 63,455 weights to produce five numbers and is entirely
-memory-bound, so its MACs are nearly free but its loads are not, while 33
-batched 99->128 rows is a shape onnxruntime is good at. Arithmetic intensity,
-not arithmetic, is what decides this. "wide" loses outright because 1,649,409
-weights is 6.6 MB and past any useful cache residency -- more capacity is a
-throughput cost here even before it is an accuracy question.
+So the prediction failed outright: 14x cheaper in MACs, 1.24x slower in wall
+clock. A 12,691->5 matvec streams 63,455 weights to produce five numbers and is
+entirely memory-bound, so its MACs are nearly free and its loads are not, while
+33 batched 99->128 rows is a shape onnxruntime is good at. Arithmetic intensity
+decides this and a MAC count cannot see it. "wide" loses for a plainer reason:
+1,649,409 weights is 6.6 MB, past any useful cache residency.
 
-Those are Apple Silicon numbers (M1, x86_64 Python under Rosetta). The denormal
-warning in export_to_onnx.py does not apply -- none of these models carry
-subnormal weights -- but GEMM-shape efficiency is still host-specific, so
-re-measure on the cluster before quoting a ratio in the paper.
+QUOTE THE x86 NUMBERS ONLY. The same three files on an Apple M1, with the
+pinned x86_64 Python under Rosetta, put flat-matched at 1.45x FASTER than
+DeepSets -- same models, same tool, same states, opposite sign. The denormal
+warning in export_to_onnx.py does not apply here (none of these models carry
+subnormal weights), but GEMM-shape efficiency is just as host-specific, and on
+this one the host decides the direction of the result and not merely its size.
 """
 
 import torch

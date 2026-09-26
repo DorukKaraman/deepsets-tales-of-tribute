@@ -179,13 +179,23 @@ def main():
             rows.append((names[i], names[j], metric, mean * scale, se * scale, t, p,
                          min(1.0, p * n_tests), better_i, better_j, unit))
 
+    def fmt_p(p):
+        """Never print a p-value as 0.0000. A t of -13.5 gives something like
+        1e-38, and rounding that to '0.0000' both loses the magnitude and reads
+        as a computation that failed."""
+        if p < 1e-9:
+            return "<1e-9"
+        if p < 1e-4:
+            return f"{p:.1e}"
+        return f"{p:.4f}"
+
     w = max(len(r[0]) for r in rows) + max(len(r[1]) for r in rows) + 5
     print(f"  {'comparison':<{w}}{'metric':<10}{'mean diff':>12}{'SE':>9}"
           f"{'t':>8}{'p':>10}{'p_adj':>10}{'better':>12}")
     for a, b, metric, mean, se, t, p, padj, ba, bb, unit in rows:
         star = " *" if padj < args.alpha else ""
         print(f"  {a + ' - ' + b:<{w}}{metric:<10}{mean:>+12.4f}{se:>9.4f}"
-              f"{t:>8.2f}{p:>10.4f}{padj:>10.4f}{f'{ba}/{ba + bb}':>12}{star}")
+              f"{t:>8.2f}{fmt_p(p):>10}{fmt_p(padj):>10}{f'{ba}/{ba + bb}':>12}{star}")
 
     print()
     print("  mean diff is (first - second), averaged over per-game means; for loss, "

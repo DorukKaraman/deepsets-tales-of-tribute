@@ -1,0 +1,180 @@
+{
+  "name": "ablation_benchmark",
+  "description": "NEEDS ONE PATH SUBSTITUTION BEFORE IT WILL RUN -- see _model_paths below. Does the DeepSets structure win GAMES, or only validation loss? The three flat-MLP ablation arms (REPRODUCE.md section 9) as the pure-network agent against SakkirinaSolo over the same 400 games each: the DeepSets control, the parameter-matched flat MLP, and the 22.57x-capacity flat MLP. All three were trained on one split with one seed through one loop, differing only in the network.",
+  "_why_games_and_not_just_val_loss": [
+    "THE OFFLINE RANKING DOES NOT PREDICT PLAYING STRENGTH, so the ablation cannot",
+    "rest on validation loss alone.",
+    "",
+    "Re-scoring the six seed-benchmark checkpoints on the full validation split showed",
+    "the shipped model LAST of the six on every offline metric -- highest loss, lowest",
+    "accuracy, lowest AUC, highest Brier -- and FIRST on win rate at 80.25%. In the same",
+    "table seed 4 is best on accuracy and AUC and is the weakest player of the six at",
+    "69.25%. With six models and offline losses spanning 0.0154 that is not evidence of",
+    "anticorrelation, but it is a clear demonstration that the offline ranking is",
+    "uninformative about playing strength at these margins.",
+    "",
+    "The ablation's offline result is much larger than those margins -- a 0.0293 loss gap",
+    "to the matched arm, about 2.7x the entire spread across the five DeepSets seeds,",
+    "at p < 1e-9 game-clustered. So it is not the same situation. But 'larger than the",
+    "case where offline failed to predict games' is an argument, not a measurement, and",
+    "this config is the measurement."
+  ],
+  "_interchangeability_was_verified": [
+    "BEFORE THIS CONFIG WAS WRITTEN, the three ONNX files were checked to be drop-in",
+    "loadable by Bots/src/DeepSetsCore.cs, which is not obvious: two of them are a",
+    "different architecture entirely.",
+    "",
+    "  inputs   node_features [num_nodes, 99] float32, global_features [1, 19] float32",
+    "  output   win_probability [batch_size, 1] float32, a RAW LOGIT",
+    "",
+    "All three match that signature exactly, byte for byte the same as the shipped",
+    "model's. The flat models do their padding, flattening and concatenation INSIDE the",
+    "graph, so no new C# feature extractor is needed and DeepSetsCore.cs's",
+    "ValueNetworkEvaluator can load any of them unchanged.",
+    "",
+    "The output scale was checked too, because a model that emitted a probability rather",
+    "than a logit would be silently sigmoided twice by the bot and would play like a",
+    "much flatter evaluator without erroring. On 400 real states the three span",
+    "[-11.3, +8.5], [-10.7, +10.7] and [-15.3, +11.8] -- all logits, none inside [0,1],",
+    "pairwise correlated 0.88-0.93. Dynamic node counts from 1 to 128 all evaluate."
+  ],
+  "_check_before_interpreting": [
+    "CHECK THE EVALUATIONS-PER-TURN COLUMN. THE FLAT ARMS SHOULD COME OUT LOWER.",
+    "",
+    "  python tools/aggregate_benchmark_results.py --config ablation_benchmark --out-dir $OUT_DIR",
+    "",
+    "This is the opposite of the check seed_benchmark.json needs, and for a real reason:",
+    "there the three models were supposed to search equally and a low row meant a broken",
+    "export, whereas here the flat models genuinely ARE slower per inference and a low",
+    "row is the expected physics.",
+    "",
+    "Measured on an x86 compute node, single-threaded, 5000 real validation states",
+    "(tools/compare_onnx_models.py): DeepSets 49.0 us median, matched 60.7 us (1.24x",
+    "slower), wide 240.0 us (4.7x slower).",
+    "",
+    "EXPECTED RATIOS, relative to the deepsets row:",
+    "  matched   0.81x to 0.94x",
+    "  wide      0.20x to 0.48x",
+    "The two bounds are the two ends of a modelling assumption, not measurement error.",
+    "The LOW end assumes a turn's time is spent entirely on inference, so evaluations",
+    "scale as 1/inference_time. The HIGH end allows for the fixed per-evaluation search",
+    "cost -- move generation, tree bookkeeping, simulation -- which inference time adds",
+    "to rather than replaces. That fixed cost is about 127 us, solved from the only pair",
+    "of (inference us, evals/turn) points measured on the same hardware and config: the",
+    "invalid first seed run's ~700 us / ~1,430 evals against the shipped row's ~58 us /",
+    "6,401 evals (see seed_benchmark.json's _first_run_was_invalid).",
+    "",
+    "So if the deepsets row lands near 6,400 evaluations per turn, expect roughly",
+    "5,200-6,000 for matched and 1,300-3,100 for wide.",
+    "",
+    "A matched row ABOVE the deepsets row, or a wide row anywhere near it, means the",
+    "SOT_MODEL_PATH substitution did not take and the arm silently fell back to",
+    "GameRunner's own copy of the shipped model. The hash pin should catch that first,",
+    "but the pin is a set check and cannot tell one allowed model from another.",
+    "",
+    "AND NOTE WHAT THIS DOES TO THE COMPARISON. The arms are NOT matched on search",
+    "volume; they are matched on wall clock, which is what a deployed agent actually",
+    "gets. A flat arm that loses is losing on the combination of evaluation quality and",
+    "evaluation rate, and this config cannot separate the two. That is the honest",
+    "framing of the result, and it is the right question for 'should we have built the",
+    "flat model instead' -- but it is the wrong question for 'is the set structure a",
+    "better evaluator'. Separating them needs SOT_TIME_SCALE on the faster side, the way",
+    "equal_effort.json does."
+  ],
+  "_model_paths": [
+    "EVERY SOT_MODEL_PATH BELOW MUST BE EDITED BEFORE SUBMITTING. One substitution:",
+    "  CHANGE_ME_HPCWORK -> the literal expansion of $HPCWORK on your cluster",
+    "                       (echo $HPCWORK on the login node), e.g. /hpcwork/yfl79180",
+    "",
+    "THE PATHS MUST BE ABSOLUTE. Not a style preference -- a relative path is resolved",
+    "against two DIFFERENT working directories on the way to the bot:",
+    "  - tools/benchmark_cluster.py checks os.path.isfile(SOT_MODEL_PATH) from wherever",
+    "    the harness was invoked;",
+    "  - the game runs with cwd=GameRunner/bin/Release/net8.0, and the bot calls",
+    "    File.Exists on the same string from THERE.",
+    "So a relative path can satisfy the harness and still miss in the bot -- and a miss",
+    "in the bot is SILENT: DeepSetsBotExp logs the rejection and falls back to its normal",
+    "resolution, which finds GameRunner's own copy of the shipped model. All three arms",
+    "would then quietly benchmark the same model and return three statistically",
+    "indistinguishable rows.",
+    "",
+    "$HPCWORK IS NOT EXPANDED. Nothing between this file and the bot runs a shell: the",
+    "env dict is passed verbatim into the child process, so a literal \"$HPCWORK/...\"",
+    "stays a literal dollar sign and the file is simply not found.",
+    "",
+    "An unedited config cannot run by accident: tools/benchmark_cluster.py checks that",
+    "SOT_MODEL_PATH exists BEFORE launching the game and aborts the task with exit 1 and",
+    "no result file if it does not. CHANGE_ME_* paths fail that check."
+  ],
+  "_what_the_pin_does_and_does_not_guarantee": [
+    "allowed_onnx_sha256 lists all three hashes because the pin is checked per task",
+    "against whatever that task's SOT_MODEL_PATH names. That is a SET check, so it",
+    "guarantees 'this task loaded one of our three known models' -- it does NOT guarantee",
+    "'the matched row loaded the matched model'. The harness has one allowed list per",
+    "config, not one per matchup.",
+    "",
+    "Here the three models differ enough that the evaluations-per-turn column will",
+    "expose a mix-up on its own, which is not true of seed_benchmark. Check it anyway:",
+    "  cd $HPCWORK/tot_ablation && sha256sum */seed_00/*.onnx",
+    "and compare against REPRODUCE.md section 9. Every result JSON also records its",
+    "task's full env, so which path each matchup used is recoverable afterwards."
+  ],
+  "_comparability": [
+    "seed_base 20260930 is new, so these are 400 games none of the other configs have",
+    "played. The three arms share it, so all three play the SAME 400 deals -- seed =",
+    "seed_base + task_id and task ids run contiguously across matchups, so arm N plays",
+    "seeds 20260930+400N.. which is a DIFFERENT 400 games per arm.",
+    "",
+    "That is the same limitation seed_benchmark has and it is deliberate: reusing one",
+    "seed range across matchups would pair the arms but would also mean the harness",
+    "could not tell two arms' result files apart by task id. Read differences against",
+    "the Wilson intervals the aggregator prints, not as a ranking. Three arms at 400",
+    "games resolve about 6 points at 95% confidence; the offline gap predicts more than",
+    "that for wide and possibly less for matched."
+  ],
+  "seed_base": 20260930,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": [
+    "4619288bd96495270b09b1f1e7a1589dded8481a84bfc12fb2faebd4c6ad464a",
+    "bbbccfb7b060b2390cc4e02c865d150c72e19d253c4e89cf4fcf79422fa40071",
+    "26c396d87dee943273501504482ef1f260fd0bec1661ec239a0c3dc6b0806db8"
+  ],
+  "bot_log": "parse",
+  "defaults": {
+    "games": 400,
+    "timeout": 10,
+    "env": {
+      "SOT_ALPHA0": "0.0",
+      "SOT_TIME_SCALE": "1.0"
+    }
+  },
+  "matchups": [
+    {
+      "label": "deepsets",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_ablation/deepsets/seed_00/DeepSetsValueNetwork_seed_00.onnx"
+      },
+      "note": "The control: the paper's architecture, retrained on the same split and seed as the two flat arms so the comparison is like-for-like. 73,089 parameters, val loss 0.4290, 78.65% accuracy, sha256 4619288b... Expect roughly 6,400 evaluations per turn, in line with the shipped row of seed_benchmark."
+    },
+    {
+      "label": "flat_matched",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_ablation/matched/seed_00/FlatValueNetwork_matched_seed_00.onnx"
+      },
+      "note": "Parameter-matched flat MLP, 12691->5->128->64->1, 72,549 parameters (0.99x the control). Val loss 0.4635, 76.73% accuracy, sha256 bbbccfb7... 1.24x slower per inference on x86, so expect 0.81-0.94x the control's evaluations per turn. Note 61.9% of its weights are identically zero after the export flush -- matched by parameter COUNT, not by effective capacity; see REPRODUCE.md section 9."
+    },
+    {
+      "label": "flat_wide",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaSolo",
+      "env": {
+        "SOT_MODEL_PATH": "CHANGE_ME_HPCWORK/tot_ablation/wide/seed_00/FlatValueNetwork_wide_seed_00.onnx"
+      },
+      "note": "Flat MLP with 22.57x the control's capacity, 12691->128->128->64->1, 1,649,409 parameters. Val loss 0.5325, 75.83% accuracy, sha256 26c396d8... This arm exists to foreclose the objection that the matched arm was starved: it is worse than matched offline on every metric and in every prestige bucket. 4.7x slower per inference, so expect only 0.20-0.48x the control's evaluations per turn -- it is doubly penalised here, and a heavy loss is the prediction rather than a surprise."
+    }
+  ]
+}
