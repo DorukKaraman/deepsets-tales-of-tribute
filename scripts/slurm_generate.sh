@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # --- Fill in before submitting ---
-REPO_ROOT="CHANGE_ME_REPO_ROOT"          # e.g. /home/you/ScriptsOfTribute-Core
+REPO_ROOT="CHANGE_ME_REPO_ROOT"          # e.g. /home/you/tot/deepsets-tales-of-tribute
 GAMES_PER_TASK="CHANGE_ME_GAMES_PER_TASK"  # integer, e.g. 300 -- total games = 32 * this
 
 # --- Have real defaults for this (second, SakkirinaGenNeural) run -- edit if

@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # SLURM array template for the cluster-scale DeepSets benchmark: 10 matchups x
-# 400 games = 4000 games, one game per array task. See
-# tools/benchmark_cluster.py for the exact matchup list and task-id layout,
-# and tools/aggregate_benchmark_results.py to summarize results afterward.
+# 400 games = 4000 games, one game per array task. The matchup list, game count
+# and --timeout now live in experiments/configs/legacy_paper_benchmark.json,
+# which reproduces the previously-hardcoded set exactly -- same order, same
+# seeds, same task ids, so an in-flight run resumes across that change. See
+# tools/benchmark_cluster.py for the config format and task-id layout, and
+# tools/aggregate_benchmark_results.py to summarize results afterward (it needs
+# the same --config).
+#
+# For the paper's NEW experiments (alpha sweep, time scaling, equal effort) use
+# scripts/slurm_experiment.sh instead, which takes any config in
+# experiments/configs/. This script stays pinned to the legacy one on purpose:
+# it is the reproduction path for numbers already reported.
 #
 # DESIGN: one array task = one game = one process, NOT one process playing
 # many games. GameRunner reuses a bot instance across --runs N, and its
@@ -17,7 +26,7 @@
 # CLUSTER DETAILS (RWTH CLAIX, filled in already -- nothing to edit here
 # unless your setup differs):
 #   partition c23ms, 1 core/task, ~2GB/core, no --account needed, .NET via
-#   `source $HOME/tot/env.sh`, repo at $HOME/tot/ScriptsOfTribute-Core.
+#   `source $HOME/tot/env.sh`, repo at $HOME/tot/deepsets-tales-of-tribute.
 #
 # ARRAY SIZE / CHUNKING: 4000 tasks may exceed this cluster's configured
 # MaxArraySize (check with `scontrol show config | grep -i MaxArraySize` on
@@ -45,16 +54,21 @@
 # always safe -- only genuinely missing/failed tasks do any work.
 #
 # SETUP (do this BEFORE sbatch-ing, not after):
-#   1. source $HOME/tot/env.sh
-#      cd $HOME/tot/ScriptsOfTribute-Core
-#      git pull
+#   1. Clone FRESH, into a NEW directory -- $HOME/tot/ScriptsOfTribute-Core is
+#      a different, older repository and does not contain this script's
+#      current harness.
+#      source $HOME/tot/env.sh
+#        git clone -b experiments \
+#            https://github.com/DorukKaraman/deepsets-tales-of-tribute.git \
+#            $HOME/tot/deepsets-tales-of-tribute
+#      cd $HOME/tot/deepsets-tales-of-tribute
 #      dotnet build Bots/Bots.csproj -c Release
 #      dotnet build GameRunner/GameRunner.csproj -c Release
 #   2. Create the logs directory yourself -- SLURM does NOT create the
 #      directory for #SBATCH --output/--error; if it doesn't already exist
 #      when this is submitted, every task fails immediately before the
 #      script body even runs:
-#        mkdir -p $HOME/tot/ScriptsOfTribute-Core/logs
+#        mkdir -p $HOME/tot/deepsets-tales-of-tribute/logs
 #   3. Verify the onnx sha256 by hand once (tools/benchmark_cluster.sh
 #      re-verifies it on every single task anyway, but see it fail loudly
 #      here first rather than 4000 times in an array log). All four
@@ -85,14 +99,14 @@
 # on purpose: #SBATCH directives are parsed by sbatch itself and do not
 # reliably expand shell variables like $HOME, so an absolute path would need
 # a literal, pre-resolved home directory hardcoded here instead. This is why
-# the SETUP steps above have you `cd $HOME/tot/ScriptsOfTribute-Core` before
+# the SETUP steps above have you `cd $HOME/tot/deepsets-tales-of-tribute` before
 # sbatch-ing -- submit from anywhere else and the logs/ directory (and its
 # mkdir -p in SETUP step 2) needs to be wherever you actually ran sbatch from.
 
 set -euo pipefail
 
 # --- Edit if your setup differs from the CLUSTER DETAILS above ---
-REPO_ROOT="$HOME/tot/ScriptsOfTribute-Core"
+REPO_ROOT="$HOME/tot/deepsets-tales-of-tribute"
 OUT_DIR="$HOME/tot/benchmark_results"    # small JSON files, not bulk data --
                                           # $HOME is fine here, unlike the
                                           # /hpcwork/... paths the data-gen
@@ -116,8 +130,9 @@ echo "Array task $SLURM_ARRAY_TASK_ID of job $SLURM_ARRAY_JOB_ID starting on $(h
 echo "REPO_ROOT=$REPO_ROOT  OUT_DIR=$OUT_DIR  SEED_BASE=$SEED_BASE"
 
 exec "$REPO_ROOT/tools/benchmark_cluster.sh" \
+  --config legacy_paper_benchmark \
   --task-id "$SLURM_ARRAY_TASK_ID" \
   --out-dir "$OUT_DIR" \
   --seed-base "$SEED_BASE" \
-  --expect-onnx-sha256 "$EXPECT_ONNX_SHA256" \
+  --allow-onnx-sha256 "$EXPECT_ONNX_SHA256" \
   --skip-build

@@ -1,0 +1,108 @@
+{
+  "name": "equal_effort_baseline_slowed",
+  "description": "CALIBRATED AND RUN. The equal-effort question from the other direction: instead of speeding DeepSetsBotExp up until it evaluates as many positions per turn as the baseline, slow SakkirinaScaled down until it evaluates as few as DeepSetsBotExp. Same question, same target ratio, opposite side moved. SOT_BASELINE_TIME_SCALE=0.141 (= 1/r), timeout 12; achieved 6,433 vs 6,627 evaluations per turn over 400 games, matched within 3%. Read with equal_effort.json, which asks the same question from the other direction.",
+  "_why_two_directions": [
+    "equal_effort.json and this config answer the same question by moving opposite sides, and",
+    "BOTH were run because neither is decisive on its own.",
+    "",
+    "Speeding the treatment up (equal_effort.json) keeps the baseline at exactly the timing it",
+    "competes at, which is the timing its author tuned it for. The cost is that it hands",
+    "DeepSetsBotExp an 88.2s per-turn budget no tournament would ever give it, so the agent",
+    "being measured is not the agent that was submitted, and the run costs roughly 9x the wall",
+    "clock of every other experiment.",
+    "",
+    "Slowing the baseline down (this config) keeps DeepSetsBotExp at exactly the timing it",
+    "competes at, and costs no more than a normal row. The cost is that it runs SakkirinaSolo's",
+    "search at about a seventh of the budget it was designed around, and a hand-tuned heuristic",
+    "agent may degrade non-linearly there -- its rule-based fast paths and tree reuse do not",
+    "scale with the clock, so the shape of its play changes, not just its depth.",
+    "",
+    "So each direction has a distortion the other does not, and the distortions are not the same",
+    "kind. What carries weight is AGREEMENT: if both directions move the win rate the same way,",
+    "the conclusion is robust to which side was moved and neither distortion explains it. If they",
+    "disagree, that is the interesting result -- it means evaluations per turn is not the right",
+    "currency for 'effort' in this matchup, and the equal-effort framing itself needs rethinking",
+    "before either number is reported.",
+    "",
+    "This direction is the cheaper one and the better-matched one (within 3%, against 0.88x for",
+    "the sped-up direction), so it is the one to lead with; the expensive direction confirms it."
+  ],
+  "_calibration": [
+    "Calibration, DeepSetsBotExp vs SakkirinaScaled, SOT_ALPHA0=0, both sides at scale 1.0:",
+    "  n = 60 games, ratio of means r = 7.08 (roughly 6.4 to 7.8).",
+    "That r is what both equal-effort configs are derived from -- one calibration, two",
+    "directions, applied to opposite sides.",
+    "",
+    "ACHIEVED, over the 400-game runs (these are the numbers to quote, not r):",
+    "  equal_effort_baseline_slowed, SOT_BASELINE_TIME_SCALE=0.141 (= 1/r), timeout 12:",
+    "      DeepSetsBotExp 6,433  vs  SakkirinaScaled 6,627 evals/turn -- within 3%.",
+    "  equal_effort, SOT_TIME_SCALE=9.0, timeout 91:",
+    "      DeepSetsBotExp 43,139 vs  SakkirinaScaled 49,131 evals/turn -- DeepSetsBotExp at",
+    "      0.88 of the baseline's effort, i.e. slightly LESS, not matched.",
+    "",
+    "Why 9.0 and not r = 7.08: evaluations per turn is only approximately linear in the time",
+    "budget -- tree reuse and the rule-based fast paths do not scale with the clock -- and a",
+    "pilot at 7.08 undershot. 9.0 was chosen empirically from that pilot, not derived.",
+    "",
+    "Both directions landed with DeepSetsBotExp doing slightly less work than the baseline",
+    "(0.97x and 0.88x), so in both the residual mismatch runs AGAINST the DeepSets agent. That",
+    "is the conservative direction for the claim: a win under these conditions is not explained",
+    "by the DeepSets side having been handed more search."
+  ],
+  "_reproducing_this": [
+    "To re-derive the scale on different hardware (the ratio is hardware-dependent):",
+    "1. tools/benchmark_cluster.sh --config equal_effort_baseline_slowed --out-dir $OUT_DIR --calibrate",
+    "   The harness prints r as a SUGGESTED SOT_TIME_SCALE. The number for THIS config is",
+    "   its RECIPROCAL, because here the baseline's clock moves, not ours: 1/7.08 = 0.141.",
+    "2. timeout stays 12: both sides have a bot-side cap of at most 9.8s (DeepSetsBotExp is",
+    "   at scale 1.0 and the baseline is slower still), so the normal margin is enough.",
+    "   This is the whole reason this direction is cheap.",
+    "3. Re-run --calibrate with the filled-in values and check the two evals/turn figures",
+    "   against each other. This direction matched within 3% at the first attempt, unlike",
+    "   the sped-up one.",
+    "4. Only then submit the 400-game array.",
+    "The harness refuses any matchup whose timeout or env is left as the string TBD."
+  ],
+  "seed_base": 20260926,
+  "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
+  "allowed_onnx_sha256": [
+    "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
+  ],
+  "bot_log": "parse",
+  "defaults": {
+    "games": 400,
+    "timeout": 12,
+    "env": {}
+  },
+  "matchups": [
+    {
+      "label": "equal_effort_baseline_slowed",
+      "bot_a": "DeepSetsBotExp",
+      "bot_b": "SakkirinaScaled",
+      "timeout": 12,
+      "env": {
+        "SOT_ALPHA0": "0.0",
+        "SOT_TIME_SCALE": "1.0",
+        "SOT_BASELINE_TIME_SCALE": "0.141"
+      },
+      "note": "DeepSetsBotExp is the fixed point here: SOT_TIME_SCALE=1.0 is exactly the timing it competes at, and SOT_ALPHA0=0 makes it the pure-network agent (behaviourally DeepSetsBot). Only the baseline's clock moves. SOT_BASELINE_TIME_SCALE=0.141 is 1/r from the 60-game calibration; it achieved 6,433 vs 6,627 evaluations per turn over the 400-game run."
+    }
+  ],
+  "calibration": {
+    "games": 20,
+    "matchups": [
+      {
+        "label": "calibrate_stock_speed",
+        "bot_a": "DeepSetsBotExp",
+        "bot_b": "SakkirinaScaled",
+        "timeout": 12,
+        "env": {
+          "SOT_ALPHA0": "0.0",
+          "SOT_TIME_SCALE": "1.0",
+          "SOT_BASELINE_TIME_SCALE": "1.0"
+        },
+        "note": "Identical to equal_effort.json's calibration block on purpose -- one measurement, both directions. Both sides at scale 1.0 measures the ratio at stock timing; the two configs then apply it to opposite sides. SakkirinaScaled rather than SakkirinaSolo because stock SakkirinaSolo emits no throughput telemetry, and at scale 1.0 the two are timing-identical."
+      }
+    ]
+  }
+}

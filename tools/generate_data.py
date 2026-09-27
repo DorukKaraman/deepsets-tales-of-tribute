@@ -1,9 +1,23 @@
 """
-Process-parallel training-data generation for <bot> vs <bot> (default
-SakkirinaGenNeural, our current best agent -- see --bot) via GameRunner's
+Process-parallel training-data generation via GameRunner's
 --log-training-data. Invoked by tools/generate_data.sh -- not usually run
 directly (it skips the build + Bots.dll/onnx integrity checks
 tools/generate_data.sh does before exec'ing here).
+
+TWO BOTS, NOT ONE. --bot sets both sides (self-play, the default and what the
+shipped model was trained on); --bot-a/--bot-b set them independently. The
+second form exists for HELD-OUT evaluation data: neither shipped model was
+trained on games between DeepSetsBotExp and SakkirinaSolo, so a dataset
+generated from that pairing is genuinely unseen, in a way that a fresh
+self-play dataset from the same generator is not. See
+tools/evaluate_checkpoints.py, which is what consumes it.
+
+SEAT ALTERNATION: when the two bots differ, consecutive jobs swap seats
+(job 0 runs bot_a as P1, job 1 runs bot_b as P1, and so on). First-player
+advantage is real and it correlates with the outcome label, so a dataset
+generated entirely with one agent in seat P1 carries a systematic bias --
+which for an evaluation set means every reported metric inherits it. Self-play
+(--bot) does not alternate, because swapping a bot with itself is a no-op.
 
 DESIGN: one OS process per JOB (bounded by --jobs concurrent processes), each
 running `--runs N` so GameRunner's own bot-instance-reuse-across-games
@@ -71,28 +85,37 @@ CLEAN_REASON_KEYS = ("prestige40", "prestige80", "patron_favor")
 DISCARDED_REASON_KEYS = ("turn_limit", "other")
 
 
-def plan_jobs(games, jobs, seed_base, out_dir):
+def plan_jobs(games, jobs, seed_base, out_dir, bot_a, bot_b, swap_offset=0):
+    """swap_offset shifts the seat-alternation parity. tools/generate_data.sh
+    passes the SLURM array task id there: with --task-id every task runs a
+    single job numbered 0, so without the offset every cluster task would put
+    the same bot in seat P1 and the alternation would never happen."""
     games_per_job = games // jobs
     remainder = games % jobs
+    alternate = bot_a != bot_b
     plan = []
     seed = seed_base
     for job_id in range(jobs):
         n = games_per_job + (1 if job_id < remainder else 0)
         if n == 0:
             continue  # more jobs than games requested; no work for this slot
+        swapped = alternate and ((job_id + swap_offset) % 2 == 1)
         plan.append({
             "job_id": job_id,
             "games": n,
             "seed": seed,
+            "swapped": swapped,
+            "p1": bot_b if swapped else bot_a,
+            "p2": bot_a if swapped else bot_b,
             "out_dir": os.path.join(out_dir, f"job_{job_id:04d}"),
         })
         seed += n
     return plan
 
 
-def build_command(binary, job, bot_name):
+def build_command(binary, job):
     return [
-        binary, bot_name, bot_name,
+        binary, job["p1"], job["p2"],
         "--runs", str(job["games"]),
         "--timeout", str(TIMEOUT_S),
         "--seed", str(job["seed"]),
@@ -130,10 +153,11 @@ def write_failure_file(failures_dir, job_id, returncode, stdout, stderr, note):
     return path
 
 
-def run_one_job(binary, job, proc_timeout, failures_dir, bot_name):
-    cmd = build_command(binary, job, bot_name)
+def run_one_job(binary, job, proc_timeout, failures_dir):
+    cmd = build_command(binary, job)
     result = {
         "job_id": job["job_id"], "seed": job["seed"], "games": job["games"],
+        "swapped": job["swapped"], "p1": job["p1"], "p2": job["p2"],
         "ok": False, "error": None, "returncode": None, "stderr_head": None,
         "failure_file": None, "wall_clock_s": None, "cmd": cmd,
     }
@@ -206,8 +230,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", required=True, help="Path to the built GameRunner binary")
-    parser.add_argument("--bot", default=DEFAULT_BOT_NAME,
-                         help=f"Bot to self-play, both sides (default: {DEFAULT_BOT_NAME})")
+    parser.add_argument("--bot", default=None,
+                         help=f"Bot to self-play, BOTH sides (default: {DEFAULT_BOT_NAME}). "
+                              f"Mutually exclusive with --bot-a/--bot-b.")
+    parser.add_argument("--bot-a", default=None,
+                         help="P1 bot. Use with --bot-b to generate from two DIFFERENT agents, "
+                              "e.g. a held-out evaluation set. Seats alternate across jobs.")
+    parser.add_argument("--bot-b", default=None, help="P2 bot. See --bot-a.")
+    parser.add_argument("--swap-offset", type=int, default=0,
+                         help="Shifts the seat-alternation parity (tools/generate_data.sh passes the "
+                              "SLURM array task id). Ignored for self-play.")
     parser.add_argument("--games", type=int, required=True, help="Total games across all jobs")
     parser.add_argument("--jobs", type=int, default=None,
                          help="Max concurrent OS processes (default: detected CPU count)")
@@ -223,6 +255,15 @@ def main():
                               "passes the sha256 it already verified during its pre-flight check.")
     args = parser.parse_args()
 
+    if args.bot and (args.bot_a or args.bot_b):
+        sys.exit("ERROR: --bot sets both sides; use either --bot or --bot-a/--bot-b, not both.")
+    if bool(args.bot_a) != bool(args.bot_b):
+        sys.exit("ERROR: --bot-a and --bot-b must be given together.")
+    if args.bot_a:
+        bot_a, bot_b = args.bot_a, args.bot_b
+    else:
+        bot_a = bot_b = args.bot or DEFAULT_BOT_NAME
+
     jobs = args.jobs if args.jobs is not None else (os.cpu_count() or 4)
     if jobs < 1:
         sys.exit("ERROR: --jobs must be >= 1")
@@ -234,10 +275,17 @@ def main():
     progress_dir = os.path.join(out_dir, ".progress")
     failures_dir = os.path.join(progress_dir, "failures")
 
-    plan = plan_jobs(args.games, jobs, seed_base, out_dir)
+    plan = plan_jobs(args.games, jobs, seed_base, out_dir, bot_a, bot_b, args.swap_offset)
     n_empty = jobs - len(plan)
 
-    print(f"Bot            : {args.bot} vs {args.bot}")
+    if bot_a == bot_b:
+        print(f"Bots           : {bot_a} vs {bot_b}  (self-play; seats not alternated)")
+    else:
+        swapped_games = sum(j["games"] for j in plan if j["swapped"])
+        print(f"Bots           : {bot_a} (bot_a) vs {bot_b} (bot_b)")
+        print(f"Seat alternation: {len(plan) - sum(1 for j in plan if j['swapped'])} job(s) with "
+              f"{bot_a} as P1, {sum(1 for j in plan if j['swapped'])} with {bot_b} as P1 "
+              f"({args.games - swapped_games}/{swapped_games} games, swap-offset={args.swap_offset})")
     print(f"Patrons        : {PATRONS}")
     print(f"Timeout        : {TIMEOUT_S}s/move")
     print(f"Games          : {args.games}")
@@ -257,9 +305,9 @@ def main():
         print(f"DRY RUN -- {len(plan)} job(s) planned, nothing will execute:")
         print()
         for job in plan:
-            cmd = build_command(args.binary, job, args.bot)
+            cmd = build_command(args.binary, job)
             print(f"  job {job['job_id']:04d}: {job['games']} games, seed={job['seed']}, "
-                  f"out_dir={job['out_dir']}")
+                  f"P1={job['p1']} P2={job['p2']}, out_dir={job['out_dir']}")
             print(f"    {' '.join(cmd)}")
         print()
         print(f"Total: {len(plan)} job(s), {sum(j['games'] for j in plan)} games.")
@@ -281,7 +329,12 @@ def main():
     resumed = []
     for job in plan:
         marker = load_marker(marker_path(progress_dir, job["job_id"]))
-        if marker is not None and marker.get("seed") == job["seed"] and marker.get("games") == job["games"] and marker.get("ok"):
+        if (marker is not None and marker.get("seed") == job["seed"]
+                and marker.get("games") == job["games"]
+                # A marker from a run with the other seat assignment describes
+                # different games, even at the same seed. Treat it as stale.
+                and marker.get("p1", job["p1"]) == job["p1"]
+                and marker.get("ok")):
             resumed.append((job, marker))
         else:
             if marker is not None:
@@ -299,7 +352,7 @@ def main():
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             futures = {
                 pool.submit(run_one_job, args.binary, job,
-                            job["games"] * per_game_watchdog, failures_dir, args.bot): job
+                            job["games"] * per_game_watchdog, failures_dir): job
                 for job in to_run
             }
             done_count = 0
@@ -309,9 +362,10 @@ def main():
                     r = fut.result()
                 except Exception as e:
                     r = {"job_id": job["job_id"], "seed": job["seed"], "games": job["games"],
+                         "swapped": job["swapped"], "p1": job["p1"], "p2": job["p2"],
                          "ok": False, "error": f"unhandled exception in run_one_job: {e!r}",
                          "returncode": None, "stderr_head": None, "failure_file": None,
-                         "wall_clock_s": None, "cmd": build_command(args.binary, job, args.bot)}
+                         "wall_clock_s": None, "cmd": build_command(args.binary, job)}
                 fresh_results.append(r)
                 done_count += 1
                 status = "ok" if r["ok"] else "FAILED"
@@ -321,6 +375,7 @@ def main():
                 if r["ok"]:
                     marker = {
                         "job_id": r["job_id"], "seed": r["seed"], "games": r["games"], "ok": True,
+                        "p1": r["p1"], "p2": r["p2"], "swapped": r["swapped"],
                         "draws": r["draws"], "p1_wins": r["p1_wins"], "p2_wins": r["p2_wins"],
                         "prestige40": r["prestige40"], "prestige80": r["prestige80"],
                         "patron_favor": r["patron_favor"], "turn_limit": r["turn_limit"],

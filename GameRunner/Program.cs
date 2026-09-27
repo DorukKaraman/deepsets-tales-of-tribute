@@ -325,6 +325,16 @@ void RunSingleThreaded(
             bot2Wrapper!.FinishGame(endReason);
         }
 
+        // One machine-readable line per game, with the EXACT GameEndReason.
+        // GameEndStatsCounter's aggregate (below) buckets TURN_TIMEOUT,
+        // INCORRECT_MOVE, BOT_EXCEPTION, INTERNAL_ERROR and both
+        // PATRON_SELECTION_* reasons together as "other factors", which is
+        // fine for a self-play data run but not for a benchmark: at a 2s
+        // per-turn budget a game lost to a timeout is not a game lost to
+        // play, and the two have to be reported separately. Parsed by
+        // tools/benchmark_cluster.py (GAME_END_REASON_PATTERN).
+        Console.WriteLine($"GAME_END_REASON: {endReason.Reason} WINNER: {endReason.Winner}");
+
         if (endReason.Reason == ScriptsOfTribute.Board.GameEndReason.BOT_EXCEPTION)
             Console.WriteLine(endReason);
         timeMeasurements[i] = granularWatch.ElapsedMilliseconds;

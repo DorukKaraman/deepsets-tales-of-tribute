@@ -86,8 +86,9 @@ unmodified* SakkirinaSolo under a new name would be republishing someone else's
 competition entry rather than building on it, so we do not do that: the
 baselines are fetched from the official archive rather than copied into this
 repository, and the two agents of ours that are near-verbatim SakkirinaSolo
-(`SakkirinaGen`, 39 of 885 lines changed; `SakkirinaHalf`, 36 of 872) ship as
-patches against the author's own file instead of as source.
+(`SakkirinaGen`, 39 of 885 lines changed; `SakkirinaHalf`, 36 of 872;
+`SakkirinaScaled`, 35 of 1192) ship as patches against the author's own file
+instead of as source.
 
 ## Third-party agents
 
@@ -103,9 +104,9 @@ comparison, fetch them from the official competition archive:
 This clones the
 [ScriptsOfTribute-CompetitionsArchive](https://github.com/ScriptsOfTribute/ScriptsOfTribute-CompetitionsArchive)
 at a pinned commit, verifies each file against a recorded SHA-256, copies the
-eight files into `Bots/src/`, and derives `SakkirinaGen.cs` and
-`SakkirinaHalf.cs` by applying `scripts/*.patch`. The fetched and derived files
-are listed in `.gitignore`; do not commit them.
+eight files into `Bots/src/`, and derives `SakkirinaGen.cs`,
+`SakkirinaHalf.cs` and `SakkirinaScaled.cs` by applying `scripts/*.patch`. The
+fetched and derived files are listed in `.gitignore`; do not commit them.
 
 **Building and running `DeepSetsBot` / `DeepSetsBlendBot` does not require
 this.** Only baseline comparisons do.
@@ -206,13 +207,17 @@ Ours:
 | `models/` | The trained model, its checkpoint, the ablation checkpoint, and their hashes. |
 | `training/` | Feature schema (`StateParser.py`), network definition, training, ONNX export, card-database generation and audit. |
 | `tools/` | Data generation, dataset splitting, cross-language parity verification, benchmarking. |
-| `experiments/` | Control conditions and null results reported in the paper. See [experiments/README.md](experiments/README.md). |
-| `scripts/` | Baseline fetching, the two SakkirinaSolo patches, and SLURM templates. |
+| `experiments/` | Control conditions, null results, the paper's experiment agent, and the experiment configs. See [experiments/README.md](experiments/README.md). |
+| `scripts/` | Baseline fetching, the three SakkirinaSolo patches, the pinned Python environment, and SLURM templates. |
 
 Upstream (unmodified unless noted): `Engine/`, `gRPC/`, `Tests/`,
 `ModuleTests/`, `BotsTests/`, `Bots/src/` (all other bots).
-`GameRunner/` is upstream plus our `--log-training-data` / `--data-dir` options
-and the OnnxRuntime wiring described above.
+`GameRunner/` is upstream plus our `--log-training-data` / `--data-dir` options,
+the OnnxRuntime wiring described above, and a one-line-per-game
+`GAME_END_REASON:` print so a benchmark can tell a timeout apart from an illegal
+move (the engine's own stats counter pools both as "other factors").
+`Engine/src/utils/GameEndStatsCounter.cs` additionally counts
+`PREPARE_TIME_EXCEEDED`, which it previously threw on.
 
 ### The dual-language feature schema
 

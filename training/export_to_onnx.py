@@ -39,14 +39,168 @@ class ONNXWrapper(torch.nn.Module):
         return self.evaluator(torch.cat([pooled, g], dim=1))
 
 
+# Agreement tolerance: |torch - onnx| <= VERIFY_ATOL + VERIFY_RTOL * |torch|,
+# the same combined form numpy.allclose uses.
+#
+# WHY NOT A FIXED ABSOLUTE BOUND. This check used to demand |diff| < 1e-5 flat,
+# which silently assumes the outputs are small. They are not, necessarily: this
+# network emits a raw logit, and on real board states the shipped export printed
+# values from -52 to +43. One ULP of float32 is 2^-17 at magnitude 16, 2^-16 at
+# 128, 2^-15 at 256 -- so at an output of 128 a single correctly-rounded bit of
+# difference is already 1.526e-05 and fails a 1e-5 bound.
+#
+# That is exactly what happened to seeds 3 and 4, at 3.052e-05 and 1.526e-05:
+# both are 1 ULP at their output magnitudes, and the relative error in both was
+# ~1.2e-7, which IS float32 epsilon. The exports were correct; the tolerance was
+# wrong.
+#
+# It went unnoticed because the check feeds torch.randn inputs rather than real
+# states, and for most checkpoints those happen to land on small outputs where
+# 1 ULP fits under 1e-5. Nothing enforced that -- a different seed's weights map
+# the same random inputs somewhere larger. So this was latent from the start,
+# not a regression.
+#
+# rtol=1e-6 is roughly 10x float32 epsilon: loose enough for accumulated
+# rounding across a dozen layers, tight enough that a real graph-level bug
+# (wrong operator, wrong pooling, transposed weights) is nowhere near it -- the
+# global_mean_pool export bug this script exists to prevent produced errors of
+# order 1, not 1e-6.
+VERIFY_ATOL = 1e-5
+VERIFY_RTOL = 1e-6
+
+# Seed for the verification inputs. The particular value is arbitrary; that it
+# is FIXED is the point.
+#
+# Unseeded, this check drew fresh inputs on every run, so the same unchanged
+# file could pass or fail depending on when it happened to run. That is not a
+# verification. It is also the real reason seeds 0-2 passed the old 1e-5 bound
+# and seeds 3-4 failed it: identical code, identical tolerance, different random
+# draws landing on different output magnitudes. And when a check does fail,
+# whoever has to diagnose it needs to be able to reproduce the failing inputs
+# rather than watch them vanish on the next run.
+VERIFY_SEED = 12345
+
+# Weights with |w| < this are zeroed in the copy that gets exported. See
+# flush_denormals below.
+#
+# WHY 1e-30 AND NOT THE SUBNORMAL BOUNDARY. float32 goes subnormal below
+# ~1.18e-38, so 1e-30 is eight orders of magnitude too generous if the goal were
+# only "remove subnormal weights". It is not: the goal is to keep onnxruntime on
+# its fast path, and a weight does not have to BE subnormal to produce subnormal
+# INTERMEDIATES. Multiply a 1e-35 weight by an input below 1 and the product is
+# subnormal, which enters the slow path just the same.
+#
+# That is measured, not theorised. On the CLUSTER (x86), seed_00:
+#     unflushed                          median 870.7 us / inference
+#     subnormal weights only zeroed      median 130    us
+#     |w| < 1e-30 zeroed                 median  52.4  us
+# Zeroing strictly the subnormals recovers most of the gap and still leaves
+# ~2.5x on the table. 1e-30 is an empirical choice that clears it; 1e-20 and
+# 1e-12 were also tried and also produced zero output change, so the exact value
+# is not delicate -- there is a very wide floor of dead weights here.
+#
+# THOSE ARE x86 NUMBERS AND DO NOT REPRODUCE ON APPLE SILICON, which flushes
+# denormals in hardware and pays nothing for them -- the same comparison there
+# shows ~1x, so checking this on a Mac makes the whole effect look imaginary.
+# tools/compare_onnx_models.py detects that case and warns rather than letting a
+# 1x ratio read as reassurance. Measure timing on the hardware the benchmark
+# actually runs on.
+#
+# SAFETY. tools/compare_onnx_models.py compared seed_00 before and after on 5000
+# real validation states: max absolute difference exactly 0, zero states with
+# any difference, zero prediction changes. These weights are dead; they
+# contribute nothing to any output the agent has ever produced.
+FLUSH_THRESHOLD = 1e-30
+
+# float32 subnormal boundary, for the diagnostic breakdown only.
+FLOAT32_TINY = 1.1754943508222875e-38
+
+
+def flush_denormals(state_dict, threshold=FLUSH_THRESHOLD):
+    """Return a COPY of state_dict with every float entry |w| < threshold set to
+    zero, plus per-tensor statistics.
+
+    A copy, deliberately. The checkpoint on disk and the model loaded from it
+    stay exactly as trained: nothing is written back to the .pth, so the
+    validation losses reported for these checkpoints remain the losses of the
+    weights that produced them. The flush exists to make the EXPORT fast, not to
+    edit the trained model.
+
+    Returns (flushed_state_dict, rows, totals) where rows is a list of
+    (name, zeroed, subnormal, numel) and totals is (zeroed, subnormal, numel).
+    """
+    flushed = {}
+    rows = []
+    tot_zeroed = tot_subnormal = tot_numel = 0
+
+    for name, tensor in state_dict.items():
+        if not torch.is_tensor(tensor) or not torch.is_floating_point(tensor):
+            flushed[name] = tensor
+            continue
+        t = tensor.detach().clone()
+        magnitude = t.abs()
+        nonzero = t != 0
+        # Count only entries the flush actually CHANGES -- an entry that is
+        # already exactly 0.0 is below the threshold but zeroing it is a no-op,
+        # and counting it would overstate what was done.
+        below = (magnitude < threshold) & nonzero
+        subnormal = (magnitude < FLOAT32_TINY) & nonzero
+
+        n_zeroed = int(below.sum().item())
+        n_subnormal = int(subnormal.sum().item())
+        t[below] = 0.0
+
+        flushed[name] = t
+        rows.append((name, n_zeroed, n_subnormal, t.numel()))
+        tot_zeroed += n_zeroed
+        tot_subnormal += n_subnormal
+        tot_numel += t.numel()
+
+    return flushed, rows, (tot_zeroed, tot_subnormal, tot_numel)
+
+
+def print_flush_report(rows, totals, threshold):
+    tot_zeroed, tot_subnormal, tot_numel = totals
+    print(f"Flushing weights with |w| < {threshold:g} to zero "
+          f"(subnormal boundary is {FLOAT32_TINY:.3e}):")
+    print(f"  {'tensor':<28}{'params':>10}{'zeroed':>10}{'of which subnormal':>21}")
+    for name, n_zeroed, n_subnormal, numel in rows:
+        print(f"  {name:<28}{numel:>10,}{n_zeroed:>10,}{n_subnormal:>21,}")
+    pct = (100.0 * tot_zeroed / tot_numel) if tot_numel else 0.0
+    print(f"  {'TOTAL':<28}{tot_numel:>10,}{tot_zeroed:>10,}{tot_subnormal:>21,}"
+          f"   ({pct:.3f}% zeroed)")
+    if tot_zeroed == 0:
+        print("  Nothing to flush -- this checkpoint has no weights below the threshold.")
+        print("  Expected for anything trained on hardware that flushes denormals itself.")
+
+
 def verify_export(base_model, onnx_filename):
     import onnxruntime as ort
     base_model.eval()
-    sess = ort.InferenceSession(onnx_filename, providers=["CPUExecutionProvider"])
-    worst = 0.0
+
+    # A LOCAL generator, not torch.manual_seed: this module gets imported, and
+    # a verification helper that quietly reseeds the global RNG would perturb
+    # whatever else in the process is drawing from it.
+    gen = torch.Generator()
+    gen.manual_seed(VERIFY_SEED)
+
+    # Single-threaded on purpose. This is a correctness check that runs one
+    # small graph at a time, so a thread pool buys nothing; left to size itself,
+    # onnxruntime opens one thread per core on the MACHINE, and inside an
+    # 8-core SLURM allocation that means a burst of pthread_setaffinity_np
+    # errors for cores the job was never given. Matches what the bot's own
+    # ValueNetworkEvaluator does in Bots/src/DeepSetsCore.cs.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(onnx_filename, opts, providers=["CPUExecutionProvider"])
+
+    worst_abs = 0.0
+    worst_rel = 0.0
+    failures = []
     for n in [1, 2, 3, 5, 15, 16, 25, 40, 60]:
-        x = torch.randn(n, NODE_DIM, dtype=torch.float32)
-        u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
+        x = torch.randn(n, NODE_DIM, dtype=torch.float32, generator=gen)
+        u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32, generator=gen)
         with torch.no_grad():
             ref = base_model(
                 MockBatch(x, torch.zeros(n, dtype=torch.int64), u)
@@ -55,24 +209,82 @@ def verify_export(base_model, onnx_filename):
             "node_features": x.numpy(),
             "global_features": u.numpy(),
         })[0].reshape(-1)[0])
-        d = abs(ref - got)
-        worst = max(worst, d)
-        print(f"  n={n:>3}  torch={ref:+.6f}  onnx={got:+.6f}  diff={d:.2e}")
-    if worst >= 1e-5:
+
+        abs_d = abs(ref - got)
+        # |ref| == 0 makes relative error undefined; the combined tolerance
+        # falls back to atol there, which is the right behaviour anyway.
+        rel_d = abs_d / abs(ref) if ref != 0.0 else float("nan")
+        tol = VERIFY_ATOL + VERIFY_RTOL * abs(ref)
+        ok = abs_d <= tol
+
+        worst_abs = max(worst_abs, abs_d)
+        if rel_d == rel_d:  # not NaN
+            worst_rel = max(worst_rel, rel_d)
+
+        rel_txt = f"{rel_d:.3e}" if rel_d == rel_d else "n/a"
+        print(f"  n={n:>3}  torch={ref:+.6f}  onnx={got:+.6f}  "
+              f"abs={abs_d:.3e}  rel={rel_txt}  tol={tol:.3e}{'' if ok else '   <-- FAIL'}")
+        if not ok:
+            failures.append((n, ref, got, abs_d, rel_d, tol))
+
+    if failures:
+        detail = "\n".join(
+            f"    n={n}: torch={ref:+.6f} onnx={got:+.6f} abs={abs_d:.3e} "
+            f"rel={rel_d:.3e} > tol={tol:.3e}"
+            for n, ref, got, abs_d, rel_d, tol in failures)
         raise RuntimeError(
-            f"EXPORT VERIFICATION FAILED: max diff {worst:.3e} over {onnx_filename}")
-    print(f"Export verified: max diff {worst:.3e}")
+            f"EXPORT VERIFICATION FAILED for {onnx_filename}: "
+            f"{len(failures)} of 9 node counts outside tolerance "
+            f"(atol={VERIFY_ATOL:.1e}, rtol={VERIFY_RTOL:.1e}).\n{detail}\n"
+            f"  A relative error near 1e-7 is float32 rounding and means the "
+            f"TOLERANCE is wrong, not the export.\n"
+            f"  A relative error orders of magnitude above that means the graph "
+            f"is wrong -- check the pooling op first (see ONNXWrapper above).")
+
+    print(f"Export verified: max abs diff {worst_abs:.3e}, max rel diff {worst_rel:.3e} "
+          f"(atol={VERIFY_ATOL:.1e}, rtol={VERIFY_RTOL:.1e})")
 
 
-def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueNetwork.onnx"):
+def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueNetwork.onnx",
+                 flush=True):
     print("=== EXPORTING SAKKIRINA TO ONNX ===")
 
-    # Load your Grandmaster weights
-    base_model = TributeValueNetwork(node_in_dim=NODE_DIM, global_in_dim=GLOBAL_DIM)
-    base_model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
-    base_model.eval() # CRITICAL: Turn off dropout/batchnorm training modes
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    wrapped_model = ONNXWrapper(base_model)
+    # base_model is the checkpoint EXACTLY as trained, and stays that way. It is
+    # the reference verify_export measures the exported graph against, so
+    # leaving it unflushed is what makes that check double as proof that the
+    # flush changed nothing: a flushed ONNX that still matches the unflushed
+    # PyTorch model to within tolerance is the statement we want.
+    base_model = TributeValueNetwork(node_in_dim=NODE_DIM, global_in_dim=GLOBAL_DIM)
+    base_model.load_state_dict(checkpoint)
+    base_model.eval()  # CRITICAL: Turn off dropout/batchnorm training modes
+
+    # export_source is a SEPARATE instance carrying the flushed copy. It has to
+    # be separate: ONNXWrapper holds references to the submodules it is handed,
+    # so flushing through the wrapper would flush base_model too and the
+    # verification would compare the flushed graph against itself.
+    if flush:
+        print()
+        flushed_state, rows, totals = flush_denormals(checkpoint, FLUSH_THRESHOLD)
+        print_flush_report(rows, totals, FLUSH_THRESHOLD)
+        print()
+        export_source = TributeValueNetwork(node_in_dim=NODE_DIM, global_in_dim=GLOBAL_DIM)
+        export_source.load_state_dict(flushed_state)
+        export_source.eval()
+    else:
+        print()
+        print("--no-flush: exporting the checkpoint's weights untouched.")
+        print("  On x86-trained checkpoints this produces a model that is correct but "
+              "far slower")
+        print("  at inference -- roughly 17x was measured for seed_00 ON x86; Apple Silicon")
+        print("  flushes denormals in hardware and shows no gap. Correct choice when "
+              "reproducing")
+        print("  an export made before flushing existed, such as the shipped model.")
+        print()
+        export_source = base_model
+
+    wrapped_model = ONNXWrapper(export_source)
 
     # 3. Create Dummy Data to trace the graph
     num_nodes = 15
@@ -83,10 +295,24 @@ def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueN
     # Dummy U: [1 graph, GLOBAL_DIM global features]
     dummy_u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
 
+    # VERIFY BEFORE PUBLISHING. Export to a temporary name alongside the real
+    # one, verify that, and only rename into place once it passes. Writing
+    # straight to onnx_filename left an UNVERIFIED model on disk whenever
+    # verification failed -- and with no SHA256SUMS beside it, since
+    # scripts/slurm_train.sh only reaches that step if this one exits 0. Seeds 3
+    # and 4 are sitting in exactly that state: a plausible-looking .onnx that
+    # nothing ever checked.
+    #
+    # Same directory as the target so the rename is atomic (os.replace across
+    # filesystems is not), and pid-tagged so two concurrent exports cannot
+    # collide. The filename is not part of the model, so the temp name does not
+    # change a byte of what lands at onnx_filename.
+    tmp_filename = f"{onnx_filename}.tmp{os.getpid()}"
+
     torch.onnx.export(
         wrapped_model,
         (dummy_x, dummy_u),  # The tuple of raw tensor inputs -- no batch_mapping
-        onnx_filename,
+        tmp_filename,
         export_params=True,
         opset_version=14,
         do_constant_folding=True,
@@ -99,8 +325,21 @@ def export_model(checkpoint_path="best_model.pth", onnx_filename="DeepSetsValueN
         }
     )
 
-    print(f"Exported to {onnx_filename}, verifying...")
-    verify_export(base_model, onnx_filename)
+    print(f"Exported to a temporary file, verifying before writing {onnx_filename} ...")
+    try:
+        verify_export(base_model, tmp_filename)
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt or a SLURM timeout
+        # mid-verification must not leave the temp file behind either.
+        try:
+            os.remove(tmp_filename)
+            print(f"Verification failed -- removed {tmp_filename}, "
+                  f"{onnx_filename} was not written.")
+        except OSError:
+            pass
+        raise
+
+    os.replace(tmp_filename, onnx_filename)
 
     file_size = os.path.getsize(onnx_filename)
     with open(onnx_filename, "rb") as f:
@@ -114,5 +353,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export a trained TributeValueNetwork checkpoint to ONNX.")
     parser.add_argument("--checkpoint", default="best_model.pth", help="Path to the .pth checkpoint to export")
     parser.add_argument("--out", default="DeepSetsValueNetwork.onnx", help="Output .onnx path")
+    parser.add_argument("--no-flush", action="store_true",
+                        help=f"Do NOT zero weights with |w| < {FLUSH_THRESHOLD:g} before export. "
+                             f"Flushing is on by default because leaving x86-trained denormals "
+                             f"in place costs roughly 17x at inference on x86. Pass this when "
+                             f"reproducing an export made before flushing existed -- the shipped "
+                             f"model, for one. Flushed and unflushed exports of the same "
+                             f"checkpoint give bit-identical outputs on real states; only the "
+                             f"bytes differ.")
     args = parser.parse_args()
-    export_model(checkpoint_path=args.checkpoint, onnx_filename=args.out)
+    export_model(checkpoint_path=args.checkpoint, onnx_filename=args.out,
+                 flush=not args.no_flush)

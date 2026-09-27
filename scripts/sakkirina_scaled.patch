@@ -1,0 +1,390 @@
+# SakkirinaSolo.cs -> SakkirinaScaled.cs  (time-budget-scalable baseline)
+#
+# WHY THIS IS A PATCH AND NOT A SOURCE FILE
+# SakkirinaScaled is ~1190 lines, of which ~35 differ from SakkirinaSolo, the
+# 2025 competition winner. Shipping it as a source file would amount to
+# redistributing someone else's competition entry under a different class name.
+# Same reasoning as scripts/sakkirina_gen.patch and scripts/sakkirina_half.patch:
+# the patch carries only our changes, and scripts/fetch_baselines.sh applies it
+# to the author's own file, fetched from the competition archive.
+#
+# SakkirinaSolo is the work of its author and is NOT covered by this
+# repository's licence. See README.md, "Third-party agents".
+#
+# WHAT THIS AGENT IS FOR
+# experiments/configs/time_scaling.json asks how the DeepSets agent's advantage
+# behaves as the per-turn time budget moves from 2s to 30s. That needs a
+# baseline whose budget moves WITH it -- holding the baseline at 9.8s while the
+# treatment varies would measure the gap between the two budgets, not the effect
+# of the budget. SakkirinaSolo's budget is two hardcoded literals, so this
+# derives a copy whose budget is an environment variable.
+#
+# It is also how the stock baseline's evaluations-per-turn gets measured at all:
+# stock SakkirinaSolo emits no throughput telemetry, and at
+# SOT_BASELINE_TIME_SCALE=1.0 this agent is timing-identical to it. That figure
+# is what experiments/configs/equal_effort.json matches against -- see
+# tools/benchmark_cluster.py --calibrate.
+#
+# WHAT THE PATCH CHANGES (five things, nothing else)
+#
+#   1. Rename.  class SakkirinaSolo -> class SakkirinaScaled, so both can be
+#      loaded as separate opponents in the same GameRunner process.
+#
+#   2. SOT_BASELINE_TIME_SCALE (default 1.0) applied to BOTH time constants:
+#      the 9.8s TurnTimeout and the 0.65s per-move cap. Read once per game in a
+#      new PregamePrepare override. At the default it is timing-identical to
+#      stock.
+#
+#      BOTH, not one. scripts/sakkirina_half.patch measured what happens
+#      otherwise: scaling only the 0.65s per-call cap and leaving TurnTimeout at
+#      9.8s produced ~73% of stock's eval rate where ~45% was intended, because
+#      cheaper individual calls simply meant more of them fit under the same
+#      unscaled per-turn ceiling before usedTimeInTurn >= TurnTimeout forced a
+#      fast move.
+#
+#      A set-but-unparseable or out-of-range value is REJECTED and logged, not
+#      silently treated as 1.0 -- a run whose label says 0.2 while it quietly
+#      played at stock speed would be indistinguishable from a real result.
+#      Parsed with InvariantCulture, so "0.5" means the same thing on a
+#      German-locale login node as it does here.
+#
+#   3. Evaluations-per-turn counter.  Evaluate() becomes non-static and
+#      increments a counter; Play()'s turn-start block closes out the previous
+#      turn; GameEnd emits a "SakkirinaScaled.EvalsPerTurn:" summary line.
+#      Per TURN, not per second (swamped by opponent thinking time) and not per
+#      game (swamped by game length) -- both of those move when the time budget
+#      moves, which is the variable under study. Two agents in one game play the
+#      same number of turns +/-1, so per-turn is what is comparable between
+#      them. Logs via BotLog (defined in Bots/src/DeepSetsCore.cs), which writes
+#      nothing unless SOT_LOG=1.
+#
+#   4. Null-move fix.  Same as scripts/sakkirina_gen.patch and
+#      scripts/sakkirina_half.patch: in Play(), bestMove comes from a tree that
+#      may have been built under a different determinization, so it can have no
+#      isomorphic match in the current possibleMoves, leaving `move` null;
+#      upstream then returns null and the engine scores it as an illegal move.
+#      bestMove is not a safe substitute (it need not be legal in this state),
+#      so fall back to possibleMoves[0], which always is.
+#
+#      This is load-bearing here, not housekeeping: the treatment
+#      (DeepSetsBotExp, via DeepSetsBlendBot) already carries the fix, so
+#      without it the control and the treatment would differ in whether they
+#      forfeit games to illegal moves as well as in time budget -- and at the
+#      2s budget, where the tree is shallowest, that is exactly when the bug
+#      fires most.
+#
+#   5. ProceedTree try/catch, so a tree-reuse failure costs a cache miss rather
+#      than the game. Defense in depth behind (4).
+#
+# APPLY
+#   patch -o Bots/src/SakkirinaScaled.cs Bots/src/SakkirinaSolo.cs \
+#         < scripts/sakkirina_scaled.patch
+#   (done for you by scripts/fetch_baselines.sh)
+#
+# BASE: ScriptsOfTribute-CompetitionsArchive commit
+#       105aaa72b2cdc4544873f75cd0356d47929dadea
+#       competition-2025-08-COG/cs_agents/SakkirinaSolo/SakkirinaSolo.cs
+--- SakkirinaSolo.cs	2026-09-22 00:00:00
++++ SakkirinaScaled.cs	2026-09-22 00:00:00
+@@ -9,7 +9,37 @@
+ namespace Bots;
+ 
+ 
+-public class SakkirinaSolo : AI
++// Copy of SakkirinaSolo.cs with exactly one functional change to how it
++// plays: BOTH constants that define its per-turn search economy -- the 9.8s
++// TurnTimeout and the 0.65s per-move cap -- are multiplied by the environment
++// variable SOT_BASELINE_TIME_SCALE (default 1.0). At the default it is
++// timing-identical to stock SakkirinaSolo.
++//
++// WHY THIS AGENT EXISTS
++// experiments/configs/time_scaling.json asks how the DeepSets agent's
++// advantage behaves as the per-turn budget moves from 2s to 30s. Answering
++// that needs a baseline whose budget moves with it -- scaling only one side
++// would measure the budget difference, not the budget. SakkirinaSolo's own
++// budget is two hardcoded literals, so this derives an env-scalable copy.
++//
++// It also carries an evaluations-per-turn counter, which is the quantity
++// experiments/configs/equal_effort.json matches on (see
++// tools/benchmark_cluster.py --calibrate). Stock SakkirinaSolo reports no
++// throughput telemetry at all, so at SOT_BASELINE_TIME_SCALE=1.0 this class is
++// also how the stock baseline's evaluations per turn get measured.
++//
++// SCALE BOTH CONSTANTS, NOT ONE. scripts/sakkirina_half.patch measured what
++// happens otherwise: scaling only the 0.65s per-call cap and leaving
++// TurnTimeout at 9.8s produced ~73% of stock's eval rate where ~45% was
++// intended, because cheaper individual calls simply meant more of them fit
++// under the same unscaled per-turn ceiling before usedTimeInTurn >=
++// TurnTimeout forced a fast move.
++//
++// SakkirinaSolo is the work of its author and is NOT covered by this
++// repository's licence. See README.md, "Third-party agents". Do not
++// restructure the search here -- if it needs fixing, fix it in
++// SakkirinaSolo.cs first.
++public class SakkirinaScaled : AI
+ {
+     static bool CheckRandomTransition(SeededGameState gameState, SeededGameState newGameState)
+     {
+@@ -212,11 +242,35 @@
+ 
+     Node? rootNode;
+     TimeSpan usedTimeInTurn = TimeSpan.FromSeconds(0);
+-    TimeSpan TurnTimeout = TimeSpan.FromSeconds(9.8);
++    TimeSpan TurnTimeout = TimeSpan.FromSeconds(BASE_TURN_TIMEOUT_SECONDS);
+     PlayerEnum myPlayerID;
+     SeededRandom rng;
+ 
+-    public SakkirinaSolo()
++    // The two literals stock SakkirinaSolo hardcodes (9.8 in the TurnTimeout
++    // initializer above, 0.65 inline in Play()), named so the scale applies to
++    // both, from the same base, on every game -- never compounding across
++    // games when GameRunner reuses one instance for --runs N.
++    const double BASE_TURN_TIMEOUT_SECONDS = 9.8;
++    const double BASE_PER_MOVE_CAP_SECONDS = 0.65;
++
++    // Resolved once per game in PregamePrepare below. 1.0 == stock timing.
++    double _timeScale = 1.0;
++    double _perMoveCapSeconds = BASE_PER_MOVE_CAP_SECONDS;
++
++    // Evaluations per turn -- the quantity equal-effort matching is defined
++    // on. Per TURN, not per second and not per game: evals/sec is swamped by
++    // opponent thinking time and evals/game by game length, and both of those
++    // change when the time budget changes, which is the variable under study.
++    // Two agents in one game play the same number of turns (+/-1), so per-turn
++    // is the figure that is directly comparable between them.
++    private long _totalEvalCalls = 0;
++    private long _turnCount = 0;
++    private long _evalCallsAtTurnStart = 0;
++    // Accumulates ONLY the "thinking" search loop (s.Elapsed per call),
++    // excluding opponent turns, rule-based/instant moves and patron selection.
++    private double _totalThinkingSeconds = 0.0;
++
++    public SakkirinaScaled()
+     {
+         this.rng = new SeededRandom(12345679u);
+         this.PrepareForGame();
+@@ -272,8 +326,11 @@
+         return 10 * (int)tier + agent.CurrentHp * 3;
+     }
+ 
+-    static double Evaluate(SeededGameState gameState, PlayerEnum playerID)
++    // No longer static: needs the instance-level _totalEvalCalls counter.
++    // Body is otherwise byte-for-byte identical to SakkirinaSolo.Evaluate.
++    double Evaluate(SeededGameState gameState, PlayerEnum playerID)
+     {
++        _totalEvalCalls++;
+         double value = 0;
+ 
+         // パトロンの選好
+@@ -816,21 +873,54 @@
+         node.Update(value);
+         return value;
+     }
++
++    // Known pre-existing SakkirinaSolo.cs bug, fixed the same way in
++    // scripts/sakkirina_gen.patch and scripts/sakkirina_half.patch: Play()
++    // could pass a null move here when bestMove has no isomorphic match in the
++    // current possibleMoves, throwing inside the inlined AreIsomorphic with no
++    // frame appearing below ProceedTree in a Release stack trace. Fixed at the
++    // source in Play() below; this catch is defense in depth, since a
++    // tree-reuse failure should cost a cache miss, not the game.
++    //
++    // This matters MORE here than in the stock agent, not less: at the short
++    // budgets experiments/configs/time_scaling.json runs, the tree is
++    // shallower and less explored, which makes "bestMove has no isomorphic
++    // match under a fresh determinization" more likely. Carrying the fix is
++    // also what keeps this a clean control -- the treatment
++    // (DeepSetsBotExp, which inherits it from DeepSetsBlendBot) already has
++    // it, so without it the two sides would differ in whether they forfeit
++    // games to illegal moves as well as in time budget.
++    private bool _firstProceedTreeExceptionLogged = false;
++
++    // Counts how often Play()'s null-move fallback below actually fires.
++    private long _noIsomorphicMatchCount = 0;
++    private bool _firstNoIsomorphicMatchLogged = false;
+ 
+     void ProceedTree(Move move)
+     {
+-        if (rootNode is null) return;
+-        if (rootNode.childs is not null &&
+-            move.Command != CommandEnum.END_TURN) {
+-            foreach (var child in rootNode.childs) {
+-                if (!child.stochastic && child.nodes?.Count == 1) {
+-                    if (MoveComparer.AreIsomorphic(child.move, move)) {
+-                        rootNode = child.nodes[0];
+-                        return;
++        try
++        {
++            if (rootNode is null) return;
++            if (rootNode.childs is not null &&
++                move.Command != CommandEnum.END_TURN) {
++                foreach (var child in rootNode.childs) {
++                    if (!child.stochastic && child.nodes?.Count == 1) {
++                        if (MoveComparer.AreIsomorphic(child.move, move)) {
++                            rootNode = child.nodes[0];
++                            return;
++                        }
+                     }
+                 }
+             }
+         }
++        catch (Exception ex)
++        {
++            if (!_firstProceedTreeExceptionLogged)
++            {
++                _firstProceedTreeExceptionLogged = true;
++                BotLog.Write($"SakkirinaScaled.ProceedTree: caught exception, falling back to no tree reuse: {ex}");
++            }
++        }
+         rootNode = null;
+     }
+ 
+@@ -842,6 +932,48 @@
+             gameState.EnemyPlayer.Prestige);
+     }
+ 
++    // Reads SOT_BASELINE_TIME_SCALE once per game and applies it to both time
++    // constants. InvariantCulture on purpose: "0.5" must parse the same way on
++    // a German-locale login node as it does here. A SET but unparseable or
++    // out-of-range value is REJECTED and logged rather than silently treated
++    // as the default -- a run that quietly measured stock timing while its
++    // label said 0.2 would be indistinguishable from a real result.
++    //
++    // (BotLog only writes when SOT_LOG=1; tools/benchmark_cluster.py enables
++    // it per task and parses the EvalsPerTurn line below.)
++    public override void PregamePrepare()
++    {
++        _totalEvalCalls = 0;
++        _turnCount = 0;
++        _evalCallsAtTurnStart = 0;
++        _totalThinkingSeconds = 0.0;
++
++        const string varName = "SOT_BASELINE_TIME_SCALE";
++        string? raw = Environment.GetEnvironmentVariable(varName);
++        string note;
++        if (string.IsNullOrWhiteSpace(raw)) {
++            _timeScale = 1.0;
++            note = $"{varName}=<unset> -> 1.0 (default, == stock SakkirinaSolo timing)";
++        } else if (!double.TryParse(raw, System.Globalization.NumberStyles.Float,
++                                    System.Globalization.CultureInfo.InvariantCulture, out double parsed)) {
++            _timeScale = 1.0;
++            note = $"{varName}='{raw}' REJECTED (unparseable as an invariant-culture double) -> 1.0";
++        } else if (double.IsNaN(parsed) || parsed < 1e-4 || parsed > 1000.0) {
++            _timeScale = 1.0;
++            note = $"{varName}='{raw}' REJECTED (outside [0.0001, 1000]) -> 1.0";
++        } else {
++            _timeScale = parsed;
++            note = $"{varName}='{raw}' -> {parsed.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}";
++        }
++
++        TurnTimeout = TimeSpan.FromSeconds(BASE_TURN_TIMEOUT_SECONDS * _timeScale);
++        _perMoveCapSeconds = BASE_PER_MOVE_CAP_SECONDS * _timeScale;
++
++        BotLog.Write($"SakkirinaScaled.Config: {note}; " +
++                     $"turnTimeoutSec={TurnTimeout.TotalSeconds.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}, " +
++                     $"perMoveCapSec={_perMoveCapSeconds.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}");
++    }
++
+     public override PatronId SelectPatron(List<PatronId> availablePatrons, int round)
+     {
+         return availablePatrons[rng.Next() % availablePatrons.Count];
+@@ -867,6 +999,18 @@
+             //Console.WriteLine("start turn ***");
+             usedTimeInTurn = TimeSpan.FromSeconds(0);
+             rootNode = null;
++
++            // Close out the turn that just ended before starting the new one.
++            // Emitted here rather than only at GameEnd so the per-turn series
++            // survives a game that ends in a timeout or an exception -- which,
++            // at the short budgets time_scaling.json runs, is not rare. The
++            // final turn has no successor, so GameEnd emits that one.
++            if (_turnCount > 0) {
++                BotLog.Write($"SakkirinaScaled.Turn: turn={_turnCount}, " +
++                             $"evals={_totalEvalCalls - _evalCallsAtTurnStart}, cumulativeEvals={_totalEvalCalls}");
++            }
++            _turnCount++;
++            _evalCallsAtTurnStart = _totalEvalCalls;
+         }
+ 
+         var move = possibleMoves[0];
+@@ -890,7 +1034,10 @@
+         }
+ 
+         // thinking...
+-        TimeSpan timeForMoveComputation = TimeSpan.FromSeconds(Math.Min(0.65, (TurnTimeout - usedTimeInTurn).TotalSeconds / 4));
++        // _perMoveCapSeconds is 0.65 * SOT_BASELINE_TIME_SCALE; TurnTimeout on
++        // the other side of the Min is scaled by the same factor in
++        // PregamePrepare. Both, together -- see the class comment.
++        TimeSpan timeForMoveComputation = TimeSpan.FromSeconds(Math.Min(_perMoveCapSeconds, (TurnTimeout - usedTimeInTurn).TotalSeconds / 4));
+         Stopwatch s = new Stopwatch();
+         s.Start();
+         if (!CheckIfSameGameStateAfterOneMove(rootNode, gameState)) rootNode = null; // check tree reuse
+@@ -901,6 +1048,7 @@
+             TreeSearch(rootNode, rng, 0);
+         }
+         usedTimeInTurn += s.Elapsed;
++        _totalThinkingSeconds += s.Elapsed.TotalSeconds;
+ 
+         var bestChild = rootNode.BestChild();
+         var bestMove = bestChild.move;
+@@ -913,12 +1061,59 @@
+             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
+         }
+ 
++        // Known pre-existing bug (see ProceedTree above): move was overwritten
++        // to RootRuleBasedMove(...)'s result earlier in this method and is only
++        // reassigned inside the foreach just above -- if bestMove (from a tree
++        // that may have been built under a different determinization) has no
++        // isomorphic match in the CURRENT possibleMoves, move is still null
++        // here, and upstream returns null, which the engine scores as an
++        // illegal move. bestMove itself is not a safe substitute -- it may not
++        // be legal in the current (re-determinized) state -- so fall back to
++        // possibleMoves[0], which always is.
++        if (move is null)
++        {
++            _noIsomorphicMatchCount++;
++            if (!_firstNoIsomorphicMatchLogged)
++            {
++                _firstNoIsomorphicMatchLogged = true;
++                BotLog.Write($"SakkirinaScaled.Play: bestMove had no isomorphic match in possibleMoves -- " +
++                             $"bestMove.Command={bestMove.Command}, bestMove type={bestMove.GetType().FullName}. " +
++                             $"Falling back to possibleMoves[0].");
++            }
++            move = possibleMoves[0];
++        }
++
+         ProceedTree(move);
+         return move;
+     }
+ 
+-    public override void GameEnd(EndGameState state, FullGameState? finalBoardState) => this.PrepareForGame();
++    public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
++    {
++        // The last turn has no successor Play() to close it (see the turn-start
++        // block above), so it is emitted here.
++        if (_turnCount > 0) {
++            BotLog.Write($"SakkirinaScaled.Turn: turn={_turnCount}, " +
++                         $"evals={_totalEvalCalls - _evalCallsAtTurnStart}, cumulativeEvals={_totalEvalCalls}");
++        }
+ 
++        // The line tools/benchmark_cluster.py parses, for every game, to report
++        // evaluations per turn per matchup and to pick the equal-effort scale.
++        // Keep the key=value shape and the "SakkirinaScaled.EvalsPerTurn:"
++        // prefix if you touch it -- EVALS_PER_TURN_PATTERN there matches on
++        // exactly that.
++        double meanEvalsPerTurn = _turnCount > 0 ? (double)_totalEvalCalls / _turnCount : 0.0;
++        double evalsPerThinkingSec = _totalThinkingSeconds > 0 ? _totalEvalCalls / _totalThinkingSeconds : 0.0;
++        var inv = System.Globalization.CultureInfo.InvariantCulture;
++        BotLog.Write($"SakkirinaScaled.EvalsPerTurn: totalEvalCalls={_totalEvalCalls}, turns={_turnCount}, " +
++                     $"meanEvalsPerTurn={meanEvalsPerTurn.ToString("F2", inv)}, " +
++                     $"thinkingSec={_totalThinkingSeconds.ToString("F2", inv)}, " +
++                     $"evalsPerThinkingSec={evalsPerThinkingSec.ToString("F1", inv)}, " +
++                     $"timeScale={_timeScale.ToString("F6", inv)}, " +
++                     $"reason={state.Reason}, winner={state.Winner}");
++        BotLog.Write($"SakkirinaScaled.NoIsomorphicMatchFallback: count={_noIsomorphicMatchCount}");
++        this.PrepareForGame();
++    }
++
+     // The following utilities are from BestMCTS3.
+     // I would like to express our deepest gratitude to the author.
+     class MoveComparer : Comparer<Move>
