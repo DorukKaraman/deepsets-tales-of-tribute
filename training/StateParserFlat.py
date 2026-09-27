@@ -97,14 +97,24 @@ FLAT_DIM = FLAT_NODE_DIM + GLOBAL_DIM     # 12,691
 # to agree between PyTorch and onnxruntime, and would surface as a
 # torch/ONNX mismatch on some states and not others. Two things guard that:
 #
-#   - the key is computed in float64. Packing location into the same scalar as
-#     the projection costs precision, and in float32 at a key magnitude of
-#     ~8000 the spacing is 5e-4, which collided 8 distinct rows out of 523.
-#     SORT_KEY_LOC_SCALE keeps the magnitude small AND float64 keeps the
-#     spacing negligible; measured collisions: 0 of 523 distinct rows.
+#   - SORT_KEY_LOC_SCALE keeps the key SMALL. Packing location into the same
+#     scalar as the projection costs precision: at a key magnitude of ~8000 the
+#     float32 spacing is 5e-4, which collided 8 distinct rows out of 523. At
+#     scale 4.0 the largest key is ~34, where the spacing is ~2e-6, and the
+#     measured collisions are 0 of 500 distinct rows.
 #   - tools/verify_flat_parity.py re-measures that on every run, so a feature
 #     schema change that introduces a collision fails loudly rather than
 #     producing a silent torch/ONNX divergence.
+#
+# FLOAT32, NOT FLOAT64, and the reason is not precision. MPS -- the device
+# train_local.pick_device() selects on Apple Silicon -- cannot represent
+# float64 at all and raises on the cast, so a float64 key makes the sorted arm
+# untrainable locally while working on the CPU-only cluster. Computing it in
+# float64 where available and float32 elsewhere would be worse still: the
+# canonical order would then be a property of the device, which is the exact
+# class of bug this file's checks exist to catch. So it is float32 everywhere.
+# Verified against a float64 key on real data: identical argsort on all 500
+# distinct rows and an identical sorted matrix on every state sampled.
 #
 # SORT_KEY_LOC_SCALE must exceed the range of the projection, or location stops
 # being the primary key. The projection lands in [0.028, 2.58] on real rows;
@@ -113,15 +123,16 @@ SORT_KEY_SEED = 20260927
 SORT_KEY_LOC_SCALE = 4.0
 
 _sort_proj_np = np.random.default_rng(SORT_KEY_SEED).random(NODE_DIM - 9)
-SORT_PROJECTION = torch.tensor(_sort_proj_np, dtype=torch.float64)
-_LOC_WEIGHTS = torch.arange(9, dtype=torch.float64)
+SORT_PROJECTION = torch.tensor(_sort_proj_np, dtype=torch.float32)
+_LOC_WEIGHTS = torch.arange(9, dtype=torch.float32)
 
 
 def row_sort_key(x):
-    """[..., NODE_DIM] -> [...] float64 sort key. location * scale + projection."""
-    feats = x[..., :NODE_DIM - 9].to(torch.float64)
-    locs = x[..., NODE_DIM - 9:].to(torch.float64)
-    return (locs @ _LOC_WEIGHTS) * SORT_KEY_LOC_SCALE + feats @ SORT_PROJECTION
+    """[..., NODE_DIM] -> [...] float32 sort key. location * scale + projection."""
+    proj = SORT_PROJECTION.to(x.device)
+    locs = _LOC_WEIGHTS.to(x.device)
+    return ((x[..., NODE_DIM - 9:] @ locs) * SORT_KEY_LOC_SCALE
+            + x[..., :NODE_DIM - 9] @ proj)
 
 
 def canonical_order(x):

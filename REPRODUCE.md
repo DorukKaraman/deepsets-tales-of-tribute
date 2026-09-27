@@ -1484,9 +1484,17 @@ cannot see that. A flat MLP reads its input slot by slot, and does:
 
 | model | reshuffle sd | ÷ one-move signal | exceeds the one-move gap | flips a winner |
 |---|---|---|---|---|
-| deepsets | **0.0000** | 0.00× | 0% of steps | 0/150 |
+| deepsets | **7.9e-08** | ~0× | 0% of steps | 0/150 |
 | flat_matched | 0.4159 | **1.27×** | **70%** of steps | 22.7% of states |
 | flat_wide | 0.6574 | **1.32×** | **73%** of steps | 31.3% of states |
+
+DeepSets' figure is not identically zero and the reason is worth stating
+precisely: it is permutation-invariant *mathematically*, but permuting the rows
+changes the order in which the mean-pool sums them, and float32 addition is not
+associative. The residue is ~1e-6 in the logit — **six orders of magnitude
+below** the flat models' 0.4, and five below the one-move signal it would have
+to disturb. Reported rather than rounded away, because "exactly 0" is a
+stronger claim than the arithmetic supports.
 
 The denominator is the logit change between consecutive states *one move
 apart*, because that is the scale a search has to resolve — not the spread
@@ -1536,9 +1544,11 @@ result supports, at 1.9 points measured and ~3.4 corrected — not at 31.
 the same 72,549 parameters as `flat_matched`, with the node rows put into a
 canonical order before flattening, inside the model, so training, offline
 scoring and ONNX inference share one definition and no C# code changes.
-Verified permutation-invariant by construction: reshuffling changes the
-flattened vector, and the exported graph's output, by **exactly 0** — as it
-does for DeepSets. It is trained with `ARCH=matched_sorted` and benchmarked as
+Verified permutation-invariant by construction, and here the invariance *is*
+bit-exact: the sort produces the identical input vector, so the identical
+arithmetic runs, and reshuffling changes the flattened vector and the exported
+graph's output by **exactly 0** — a stronger guarantee than DeepSets itself
+offers, whose mean-pool leaves ~1e-6 of float32 reassociation. It is trained with `ARCH=matched_sorted` and benchmarked as
 task ids 1200–1599, appended so the first three arms' ids and results are
 untouched. **Its results are pending**; until they land, the difference between
 it and `flat_matched` is the unmeasured quantity this section turns on.
@@ -1546,8 +1556,29 @@ it and `flat_matched` is the unmeasured quantity this section turns on.
 ```bash
 ARCH=matched_sorted OUT_ROOT="$HPCWORK/tot_ablation/matched_sorted" \
     sbatch --array=0 scripts/slurm_train.sh
+
+# CONFIRM THE EXPORT CARRIES THE SORT before benchmarking it. An export made
+# with the wrong --arch passes its own verification -- the PyTorch reference it
+# checks against is built from the same wrong arch -- so this is the check that
+# catches it, and it needs nothing but the .onnx.
+python tools/analyze_order_sensitivity.py invariance --data-dir "$SPLIT/val" \
+    --onnx sorted="$HPCWORK/tot_ablation/matched_sorted/seed_00/FlatValueNetwork_matched_sorted_seed_00.onnx" \
+    --onnx matched="$HPCWORK/tot_ablation/matched/seed_00/FlatValueNetwork_matched_seed_00.onnx" \
+    --expect-invariant sorted
+
 # then add its ONNX sha256 to ablation_benchmark.json and submit 1200-1599
 ```
+
+**The arch is not recoverable from a flat checkpoint's weights.** `matched` and
+`matched_sorted` have identical widths and identical parameter counts, and
+differ only in whether the rows are sorted — which lives in a plain attribute,
+not in the `state_dict`. `tools/evaluate_checkpoints.py` therefore reads the
+arch from the `run_config.json` beside the checkpoint's *real* path (following
+symlinks), accepts `--arch PATH=ARCH` as an override, and **refuses to score a
+flat checkpoint whose arch it cannot establish** rather than defaulting to
+`matched`. `training/export_flat_to_onnx.py` resolves it the same way and has
+no default either. Both print the resolved arch and where it came from, and it
+is recorded in the JSON output and in the per-state CSV's `#` preamble.
 
 No C# encoder and no bot were needed for any of this: the exported graph takes
 the same `(node_features, global_features)` inputs as the DeepSets model and

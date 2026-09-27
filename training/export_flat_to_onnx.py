@@ -193,7 +193,7 @@ def verify_flat_export(base_model, onnx_filename, sort=False):
           f"(atol={VERIFY_ATOL:.1e}, rtol={VERIFY_RTOL:.1e})")
 
 
-def export_flat_model(checkpoint_path, onnx_filename, arch="matched", flush=True):
+def export_flat_model(checkpoint_path, onnx_filename, arch, flush=True):
     print(f"=== EXPORTING FLAT-MLP ({arch}) TO ONNX ===")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -295,13 +295,42 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default="best_model.pth",
                         help="Path to the .pth checkpoint to export")
     parser.add_argument("--out", default="FlatValueNetwork.onnx", help="Output .onnx path")
-    parser.add_argument("--arch", default="matched", choices=sorted(FLAT_CONFIGS),
-                        help="Must match what the checkpoint was trained with; the "
-                             "load_state_dict below fails loudly if it does not.")
+    parser.add_argument("--arch", default=None, choices=sorted(FLAT_CONFIGS),
+                        help="Which flat arch this checkpoint was trained as. Read from "
+                             "run_config.json beside the checkpoint if omitted; there is "
+                             "deliberately NO default. 'matched' and 'matched_sorted' "
+                             "have identical shapes, so load_state_dict cannot catch a "
+                             "wrong value -- it would export a graph without the "
+                             "canonical sort, and verification would pass, because the "
+                             "reference it checks against would be wrong the same way.")
     parser.add_argument("--no-flush", action="store_true",
                         help=f"Do NOT zero weights with |w| < {FLUSH_THRESHOLD:g} before "
                              f"export. Flushing is on by default -- see export_to_onnx.py.")
     args = parser.parse_args()
 
+    arch = args.arch
+    if arch is None:
+        cfg = os.path.join(os.path.dirname(os.path.realpath(args.checkpoint)),
+                           "run_config.json")
+        if os.path.isfile(cfg):
+            import json
+            with open(cfg) as f:
+                arch = json.load(f).get("arch")
+        if arch is None:
+            raise SystemExit(
+                f"ERROR: --arch not given and no usable 'arch' in {cfg}.\n"
+                f"  The arch is not recoverable from the weights: 'matched' and "
+                f"'matched_sorted' have identical widths and parameter counts, and "
+                f"differ only in whether node rows are sorted before flattening.\n"
+                f"  Guessing would export a graph missing the canonical sort, and the "
+                f"export verification would still PASS, because it compares against a "
+                f"PyTorch reference built from the same wrong guess.\n"
+                f"  Pass --arch explicitly, or keep train_flat.py's run_config.json "
+                f"beside the checkpoint.")
+        print(f"--arch not given; using arch={arch!r} from {cfg}")
+    if arch not in FLAT_CONFIGS:
+        raise SystemExit(f"ERROR: unknown arch {arch!r}; choose from "
+                         f"{', '.join(sorted(FLAT_CONFIGS))}")
+
     export_flat_model(checkpoint_path=args.checkpoint, onnx_filename=args.out,
-                      arch=args.arch, flush=not args.no_flush)
+                      arch=arch, flush=not args.no_flush)

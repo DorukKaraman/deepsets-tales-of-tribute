@@ -50,7 +50,19 @@ def read_per_state(path):
     'n', and per model 'loss_sum' / 'correct'. One pass, no per-state storage."""
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt") as f:
-        header = f.readline().rstrip("\n").split(",")
+        # evaluate_checkpoints.py writes a '#' preamble naming the architecture
+        # each column was scored as -- 'matched' and 'matched_sorted' produce
+        # identically-named columns and identically-shaped weights, so the
+        # column name alone does not identify the model. Echo it, so a p-value
+        # is never reported without saying what was compared.
+        preamble = []
+        line = f.readline()
+        while line.startswith("#"):
+            preamble.append(line[1:].strip())
+            line = f.readline()
+        for entry in preamble:
+            print(f"  [scored as] {entry}")
+        header = line.rstrip("\n").split(",")
         if len(header) < 5 or header[:4] != ["game_id", "target", "prestige_clock", "bucket"]:
             sys.exit(f"ERROR: {path} does not look like an evaluate_checkpoints.py "
                      f"--per-state-out file.\n"

@@ -8,7 +8,7 @@ states, in which the hidden piles are reshuffled, and a flat MLP reads its
 input slot by slot. DeepSets is permutation-invariant and cannot notice; a flat
 model can, and does.
 
-Three analyses, all on real logged states:
+Four analyses, all on real logged states:
 
   sensitivity  How far does reshuffling the hidden piles move each model's
                output? Reported against two scales: the spread across unrelated
@@ -22,6 +22,12 @@ Three analyses, all on real logged states:
                the third tests whether the clustering regularity in the logged
                data is what the model was using.
 
+  invariance   Does a given .onnx carry the canonical row sort? Reports the
+               reshuffle sd per exported graph and fails if one that should be
+               permutation-invariant is not -- the check for a matched_sorted
+               checkpoint exported with the wrong --arch, which passes its own
+               export verification and is otherwise silent.
+
   leak         Does the logged pile order reflect the TRUE upcoming draw order
                -- information no player has? If it did, the flat models'
                offline numbers would be inflated by a leak rather than by
@@ -34,6 +40,12 @@ Read-only. Usage:
         --onnx deepsets=.../DeepSetsValueNetwork_seed_00.onnx \\
         --onnx matched=.../FlatValueNetwork_matched_seed_00.onnx \\
         --onnx wide=.../FlatValueNetwork_wide_seed_00.onnx
+
+    python tools/analyze_order_sensitivity.py invariance --data-dir "$SPLIT/val" \\
+        --onnx deepsets=.../DeepSetsValueNetwork_seed_00.onnx \\
+        --onnx matched=.../FlatValueNetwork_matched_seed_00.onnx \\
+        --onnx matched_sorted=.../FlatValueNetwork_matched_sorted_seed_00.onnx \\
+        --expect-invariant deepsets --expect-invariant matched_sorted
 
 `leak` needs no models. Every analysis is seeded, so reruns agree.
 """
@@ -60,6 +72,11 @@ except ImportError as e:  # pragma: no cover - environment problem, not logic
 # The others are public information and are not re-randomised.
 HIDDEN_LOCS = (4, 8)
 LOC_BASE = 90        # location one-hot occupies node-feature indices 90..98
+
+# Below this, a model counts as permutation-invariant. See run_invariance:
+# bit-exact for a sorted flat export, ~1e-6 for DeepSets (float32 reassociation
+# in the mean-pool), ~0.4 for an unsorted flat model. Nothing lands between.
+INVARIANCE_TOL = 1e-4
 
 
 def loc_of(row):
@@ -288,10 +305,75 @@ def run_leak(data_dir, limit):
         print()
 
 
+def run_invariance(models, data_dir, n_states, k, seed, expect_invariant):
+    """Does the EXPORTED GRAPH carry the canonical sort?
+
+    The sort lives inside the model, so whether an .onnx has it is a property
+    of the file, not of the checkpoint it came from -- and exporting a
+    matched_sorted checkpoint with the wrong --arch produces a graph that is
+    missing it, passes its own export verification (the reference is built
+    from the same wrong arch), and plays differently. This is the check that
+    catches that, and it needs nothing but the .onnx.
+
+    INVARIANCE IS JUDGED TO A TOLERANCE, and the reason is worth knowing.
+    A *_sorted flat export is invariant BIT-EXACTLY: the sort produces the
+    identical input vector, so the identical arithmetic runs. DeepSets is not,
+    quite -- it is invariant mathematically, but permuting the rows changes the
+    order in which the mean-pool sums them, and float32 addition is not
+    associative. Measured, that costs about 1e-6 in the logit.
+
+    So the verdict is "invariant" below INVARIANCE_TOL and "sensitive" above
+    it. The two populations are not close: reassociation noise lands at ~1e-6
+    and real order sensitivity at ~0.4, five to six orders apart, so no
+    threshold in between is delicate. The printed numbers show which case a
+    model is in, and a model NOT listed whose diff is ~0 fails too, because
+    that means the reshuffle did nothing and the test proved nothing.
+    """
+    states = load_states(data_dir, 53, n_states)
+    print(f"  {len(states)} real states x {k} reshuffles of the hidden piles\n")
+    print(f"  {'model':<18}{'reshuffle sd':>14}{'max |diff|':>13}{'kind':>18}"
+          f"{'expected':>12}{'verdict':>8}")
+    failures = []
+    for name, path in models.items():
+        sess = session(path)
+        sds, worst = [], 0.0
+        for x, u, _ in states:
+            locs = np.array([loc_of(r) for r in x])
+            base = infer(sess, x, u)
+            rng = np.random.default_rng(seed)
+            v = np.array([infer(sess, reorder(x, locs, rng, "uniform"), u)
+                          for _ in range(k)])
+            sds.append(v.std())
+            worst = max(worst, float(np.abs(v - base).max()))
+        sd = float(np.mean(sds))
+        want_inv = name in expect_invariant
+        is_inv = worst < INVARIANCE_TOL
+        ok = is_inv if want_inv else not is_inv
+        kind = ("bit-exact" if worst == 0.0
+                else "float32 reassoc" if is_inv else "order-sensitive")
+        if not ok:
+            failures.append(
+                f"{name}: sd={sd:.6g}, max|diff|={worst:.6g}, expected "
+                + (f"permutation-invariant (< {INVARIANCE_TOL:g})" if want_inv
+                   else "order-sensitive -- a diff below tolerance here means the "
+                        "reshuffle did nothing, so the test is vacuous"))
+        print(f"  {name:<18}{sd:>14.6g}{worst:>13.6g}{kind:>18}"
+              f"{('invariant' if want_inv else 'sensitive'):>12}"
+              f"{('PASS' if ok else 'FAIL'):>8}")
+    print()
+    if failures:
+        print("FAILED:")
+        for f in failures:
+            print(f"  - {f}")
+        sys.exit(1)
+    print("PASSED: every export behaves as its architecture requires.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("analysis", choices=["sensitivity", "accuracy", "leak", "all"])
+    p.add_argument("analysis",
+                   choices=["sensitivity", "accuracy", "leak", "invariance", "all"])
     p.add_argument("--data-dir", required=True)
     p.add_argument("--onnx", action="append", default=[], metavar="NAME=PATH",
                    help="Repeatable. Not needed for 'leak'.")
@@ -301,6 +383,10 @@ def main():
     p.add_argument("--leak-records", type=int, default=60000)
     p.add_argument("--reshuffles", type=int, default=24)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--expect-invariant", action="append", default=[], metavar="NAME",
+                   help="For 'invariance': this model MUST be unaffected by reshuffling "
+                        "(DeepSets, and any *_sorted flat export). Repeatable. Models "
+                        "not listed must be affected, or the test is vacuous.")
     args = p.parse_args()
 
     models = {}
@@ -311,7 +397,7 @@ def main():
         if not os.path.isfile(path):
             sys.exit(f"ERROR: no such ONNX file: {path}")
         models[name] = path
-    if args.analysis in ("sensitivity", "accuracy", "all") and not models:
+    if args.analysis in ("sensitivity", "accuracy", "invariance", "all") and not models:
         sys.exit(f"ERROR: '{args.analysis}' needs at least one --onnx NAME=PATH")
 
     if args.analysis in ("sensitivity", "all"):
@@ -321,6 +407,10 @@ def main():
         print("=" * 78); print("OFFLINE ACCURACY: LOGGED vs RESHUFFLED ORDER"); print("=" * 78)
         run_accuracy(models, args.data_dir, args.accuracy_states, args.seed)
         print()
+    if args.analysis == "invariance":
+        print("=" * 78); print("DOES THE EXPORTED GRAPH CARRY THE CANONICAL SORT?"); print("=" * 78)
+        run_invariance(models, args.data_dir, min(args.states, 60), args.reshuffles,
+                       args.seed, set(args.expect_invariant))
     if args.analysis in ("leak", "all"):
         print("=" * 78); print("DOES THE LOGGED ORDER LEAK THE TRUE DRAW ORDER?"); print("=" * 78)
         run_leak(args.data_dir, args.leak_records)

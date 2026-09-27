@@ -161,11 +161,23 @@ class DeployedFlatNetwork(torch.nn.Module):
     Padding and flattening go through StateParserFlat.pad_and_flatten rather
     than being rebuilt here, so this scores the layout the model was actually
     trained on.
+
+    THE ARCH MUST BE PASSED IN. It cannot be read off the weights: `matched`
+    and `matched_sorted` are the SAME network with the same widths and the same
+    72,549 parameters, differing only in whether the node rows are sorted into
+    a canonical order before flattening. That difference lives in a plain
+    attribute on FlatGraphAdapter, not in a buffer, so it is not in the
+    state_dict at all. Inferring the arch from `mlp.*` keys would score a
+    sorted checkpoint through the unsorted path and silently report the wrong
+    number -- and it would look entirely plausible, because both models are
+    real models that produce real logits. load_checkpoint therefore resolves
+    the arch from run_config.json or an explicit override and refuses to guess.
     """
 
-    def __init__(self, state_dict):
+    def __init__(self, state_dict, arch):
         super().__init__()
         from StateParserFlat import FLAT_DIM
+        from ValueNetworkFlat import SORTED_ARCHS
         indices = sorted({int(k.split(".")[1]) for k in state_dict if k.startswith("mlp.")})
         layers = []
         for pos, idx in enumerate(indices):
@@ -175,14 +187,43 @@ class DeployedFlatNetwork(torch.nn.Module):
                 layers.append(torch.nn.ReLU())
         self.mlp = torch.nn.Sequential(*layers)
         self.flat_dim = FLAT_DIM
+        self.arch = arch
+        self.sort = arch in SORTED_ARCHS
 
     def forward(self, x, batch_index, num_graphs, u):
         from StateParserFlat import batch_pad_and_flatten
-        z = batch_pad_and_flatten(x, batch_index, u, num_graphs=num_graphs)
+        z = batch_pad_and_flatten(x, batch_index, u, num_graphs=num_graphs,
+                                  sort=self.sort)
         return self.mlp(z).view(-1)
 
 
-def load_checkpoint(path):
+def resolve_flat_arch(path, overrides):
+    """(arch, source) for a flat checkpoint, or (None, reason) if unresolvable.
+
+    run_config.json is read from the checkpoint's REAL directory. Checkpoints
+    are routinely scored through symlinks -- the cluster job symlinks each
+    arm's best_model.pth to ckpts/deepsets.pth, ckpts/matched.pth and so on --
+    and the run_config.json sits next to the real file, not next to the link.
+    """
+    for key in (path, os.path.realpath(path)):
+        if key in overrides:
+            return overrides[key], "--arch override"
+    cfg = os.path.join(os.path.dirname(os.path.realpath(path)), "run_config.json")
+    if os.path.isfile(cfg):
+        try:
+            with open(cfg) as f:
+                arch = json.load(f).get("arch")
+        except (OSError, ValueError) as e:
+            return None, f"{cfg} could not be read ({e})"
+        if arch:
+            return arch, f"run_config.json ({cfg})"
+        return None, f"{cfg} has no 'arch' key"
+    return None, f"no run_config.json beside {os.path.realpath(path)}"
+
+
+def load_checkpoint(path, overrides=None):
+    """Returns (model, arch, arch_source). arch is "deepsets" for the set model."""
+    overrides = overrides or {}
     state_dict = torch.load(path, map_location="cpu")
     if not isinstance(state_dict, dict):
         raise ValueError(f"expected a state_dict, got {type(state_dict).__name__}")
@@ -203,7 +244,28 @@ def load_checkpoint(path):
     # the other's forward pass and report the result as an ablation.
     if any(k.startswith("mlp.") for k in state_dict):
         from StateParserFlat import FLAT_DIM
-        model = DeployedFlatNetwork(state_dict)
+        from ValueNetworkFlat import FLAT_CONFIGS
+
+        arch, source = resolve_flat_arch(path, overrides)
+        if arch is None:
+            raise ValueError(
+                f"this is a flat-MLP checkpoint and its arch could not be determined: "
+                f"{source}.\n"
+                f"  The arch is NOT recoverable from the weights. 'matched' and "
+                f"'matched_sorted' have identical widths and identical parameter counts; "
+                f"they differ only in whether the node rows are sorted before "
+                f"flattening, which is not stored in the state_dict.\n"
+                f"  Scoring the wrong one produces a plausible, wrong number rather than "
+                f"an error, so this refuses to guess.\n"
+                f"  Fix it by keeping run_config.json beside the checkpoint (train_flat.py "
+                f"writes one), or pass --arch {path}=<arch>.\n"
+                f"  Known archs: {', '.join(sorted(FLAT_CONFIGS))}")
+        if arch not in FLAT_CONFIGS:
+            raise ValueError(
+                f"arch {arch!r} (from {source}) is not a known flat arch. "
+                f"Known: {', '.join(sorted(FLAT_CONFIGS))}")
+
+        model = DeployedFlatNetwork(state_dict, arch)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             raise ValueError(f"state_dict does not match the flat network "
@@ -216,7 +278,7 @@ def load_checkpoint(path):
                 f"{FLAT_DIM}. This checkpoint was trained against a different MAX_NODES -- "
                 f"the numbers would be meaningless.")
         model.eval()
-        return model
+        return model, arch, source
 
     model = DeployedValueNetwork(state_dict)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -233,7 +295,7 @@ def load_checkpoint(path):
         raise ValueError(f"checkpoint expects {model.global_encoder[0].in_features}-dim global "
                          f"features but the current schema produces {GLOBAL_DIM}.")
     model.eval()
-    return model
+    return model, "deepsets", "state_dict keys (node_encoder.*)"
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +399,13 @@ def main():
                         help="Max samples to score (0 = all). Applied before any model runs, so every "
                              "model still sees the same samples.")
     parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--arch", action="append", default=[], metavar="PATH=ARCH",
+                        help="Force a flat checkpoint's architecture, overriding its "
+                             "run_config.json. Repeatable. PATH may be the path as given "
+                             "or its realpath. Needed only when run_config.json is absent "
+                             "-- the arch cannot be read off the weights, because "
+                             "'matched' and 'matched_sorted' have identical shapes and "
+                             "differ only in whether rows are sorted before flattening.")
     parser.add_argument("--json-out", default=None, help="Also write the metrics to this JSON file")
     parser.add_argument("--per-state-out", default=None, metavar="PATH.csv.gz",
                         help="Also write one gzipped CSV row per scored state: game_id, "
@@ -347,6 +416,15 @@ def main():
                              "cluster on -- the aggregate metrics above cannot support a "
                              "significance claim on their own.")
     args = parser.parse_args()
+
+    arch_overrides = {}
+    for spec in args.arch:
+        if "=" not in spec:
+            sys.exit(f"ERROR: --arch wants PATH=ARCH, got {spec!r}")
+        ap, av = spec.rsplit("=", 1)
+        arch_overrides[ap] = av
+        arch_overrides[os.path.realpath(ap)] = av
+
     if args.per_state_out and not args.per_state_out.endswith(".gz"):
         sys.exit("ERROR: --per-state-out must end in .gz (the file is written gzipped; "
                  "one row per state is large).")
@@ -357,15 +435,29 @@ def main():
 
     models = OrderedDict()
     for path in args.checkpoints:
-        name = os.path.splitext(os.path.basename(path))[0]
+        # Take as many trailing path components as it takes to be unique.
+        #
+        # One component was not enough, and the failure was silent: the three
+        # ablation arms live at <arch>/seed_00/best_model.pth, so the basename
+        # collides for all three AND so does basename-plus-parent ("seed_00/
+        # best_model"), and the later model simply overwrote the earlier one in
+        # the dict -- two rows reported where three were asked for. The cluster
+        # run happened to dodge it by symlinking the arms to distinct names.
+        parts = os.path.splitext(os.path.normpath(os.path.abspath(path)))[0].split(os.sep)
+        name = parts[-1]
+        for depth in range(2, len(parts) + 1):
+            if name not in models:
+                break
+            name = os.path.join(*parts[-depth:])
         if name in models:
-            # Two checkpoints with the same basename from different directories
-            # would otherwise silently overwrite each other in the report.
-            name = os.path.join(os.path.basename(os.path.dirname(path)), name)
+            sys.exit(f"ERROR: two checkpoints resolve to the same report name {name!r}. "
+                     f"Pass them from distinct paths.")
         if not os.path.isfile(path):
             sys.exit(f"ERROR: checkpoint not found: {path}")
         try:
-            models[name] = {"path": path, "model": load_checkpoint(path), "logits": []}
+            model, arch, arch_source = load_checkpoint(path, arch_overrides)
+            models[name] = {"path": path, "model": model, "arch": arch,
+                            "arch_source": arch_source, "logits": []}
         except Exception as e:
             sys.exit(f"ERROR: could not load {path}: {e}")
 
@@ -374,6 +466,10 @@ def main():
     print("=" * 78)
     for name, entry in models.items():
         print(f"  {name:<28} {entry['path']}")
+        # The arch is printed WITH ITS SOURCE because for the flat models it is
+        # not recoverable from the weights, and scoring matched_sorted as
+        # matched produces a plausible wrong number rather than an error.
+        print(f"  {'':<28} arch: {entry['arch']}  (from {entry['arch_source']})")
     print()
 
     labels, clocks = [], []
@@ -388,6 +484,12 @@ def main():
     per_state = None
     if args.per_state_out:
         per_state = gzip.open(args.per_state_out, "wt", newline="")
+        # A '#' preamble records which arch each column was scored as, since
+        # the column name alone cannot distinguish matched from matched_sorted.
+        # tools/clustered_significance.py skips leading '#' lines.
+        for n, e in models.items():
+            per_state.write(f"# {n}\tarch={e['arch']}\tsource={e['arch_source']}"
+                            f"\tpath={e['path']}\n")
         per_state.write(",".join(
             ["game_id", "target", "prestige_clock", "bucket"]
             + [f"p_{n}" for n in models]) + "\n")
@@ -457,6 +559,9 @@ def main():
         print_model_report(name, overall, by_bucket)
         report["models"][name] = {
             "path": os.path.abspath(entry["path"]),
+            "real_path": os.path.realpath(entry["path"]),
+            "arch": entry["arch"],
+            "arch_source": entry["arch_source"],
             "overall": overall,
             "by_prestige_bucket": {bucket_label(i): by_bucket[i] for i in by_bucket},
         }
