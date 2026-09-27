@@ -1457,9 +1457,9 @@ four times out of five.
 
 **Search volume does not explain it.** `flat_matched` ran **1.04× the control's
 evaluations per turn** — slightly *more* search — and still lost by 31 points.
-My pre-run prediction for that row (0.81–0.94×, from its 1.24× slower
-inference) was simply wrong; the `flat_wide` prediction (0.20–0.48×) was right
-at 0.40×. `flat_wide` is doubly confounded — 2.5× less search *and* the
+The pre-run prediction for that row (0.81–0.94×, from its 1.24× slower
+inference) was wrong; the `flat_wide` prediction (0.20–0.48×) was right at
+0.40×. `flat_wide` is doubly confounded — 2.5× less search *and* the
 overfitting visible in its rising validation loss — so read it as a direction,
 not a measurement.
 
@@ -1625,14 +1625,20 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   validation set is in its training data, and its 0.4585 on the common pass is
   reported for completeness only.
 
-  For how large the effect can be, see [section 9](#9-flat-mlp-ablation): that
-  ablation was first run at `--num-workers 4` and had to be discarded, because
-  the three arms drew *different* shard multisets — the DataLoader seeds its
-  workers from the main-process RNG after model construction, and the three
-  architectures consume different amounts of it. That run put the
-  DeepSets-versus-flat loss gap at 0.103; the clean re-run puts it at 0.054. The
-  bug had inflated the apparent advantage roughly twofold, in the direction that
-  flattered this paper's own architecture.
+  For how large the effect can be, see [section 9](#9-flat-mlp-ablation): the
+  ablation's **subset pilot** was first run at `--num-workers 4` and had to be
+  discarded, because the three arms drew *different* shard multisets — the
+  DataLoader seeds its workers from the main-process RNG after model
+  construction, and the three architectures consume different amounts of it.
+  That run put the DeepSets-versus-flat loss gap at 0.103; the clean re-run put
+  it at 0.054. The bug had inflated the apparent advantage roughly twofold, in
+  the direction that flattered this paper's own architecture.
+
+  **Both of those are 6% subset-pilot figures and neither is the result.** They
+  are quoted here only to size the bug. The full-corpus run, on the same split
+  every other model in this document uses, puts the DeepSets-versus-matched
+  loss gap at **0.0293** — see [Accuracy](#accuracy) in section 9. Do not
+  compare 0.054 against that, or against anything in the section 9 tables.
 - **Byte-identical ONNX export requires PyTorch 2.2.2.** The model itself
   reproduces exactly on any version; only the file hash does not.
 - **Training data is not distributed** (several GB) and regenerates only
