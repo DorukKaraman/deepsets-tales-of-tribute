@@ -651,7 +651,7 @@ it is still not skippable.
 ## 7. Paper experiments
 
 Five questions across six configs — equal effort is asked twice, once from
-each direction. One harness, one build. Each config is a JSON file in
+each direction. All six have been run. One harness, one build. Each config is a JSON file in
 [`experiments/configs/`](experiments/configs/) — see
 [that directory's README](experiments/configs/README.md) for the format, and
 [`experiments/README.md`](experiments/README.md) for the agents they use.
@@ -668,7 +668,7 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 | `equal_effort` | Is the network better, or is the baseline just searching more? Treatment sped up. | 400 |
 | `equal_effort_baseline_slowed` | The same question, baseline slowed down instead. | 400 |
 | `seed_benchmark` | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. | 2400 |
-| `ablation_benchmark` | Does the DeepSets structure win *games*, or only validation loss? Three flat-MLP arms plus a control; a fourth, permutation-invariant arm is pending. | 1600 |
+| `ablation_benchmark` | Does the DeepSets structure win *games*, or only validation loss? A control and three flat-MLP arms, including a permutation-invariant one. | 1600 |
 
 ### Equal effort is run in both directions
 
@@ -1230,10 +1230,11 @@ was built.
 ### Accuracy
 
 Full corpus, on the cluster: the same 90/10 game-aware split every other model
-in this document was trained on, three epochs, `--seed 0`, all three arms
+in this document was trained on, three epochs, `--seed 0`, all four arms
 identical apart from the network. The DeepSets row is a **control trained
-here**, not the shipped model, so that all three share a split, a seed, a loop
-and a loader.
+here**, not the shipped model, so that all four share a split, a seed, a loop
+and a loader. `matched_sorted` was trained later than the other three, with the
+same command and the same seed.
 
 Validation loss by epoch, best in bold:
 
@@ -1241,6 +1242,7 @@ Validation loss by epoch, best in bold:
 |---|---|---|---|
 | deepsets | 0.4348 | **0.4290** | 0.4304 |
 | matched | 0.4727 | **0.4635** | 0.4723 |
+| matched_sorted | 0.4614 | **0.4603** | 0.4632 |
 | wide | **0.5325** | 0.5562 | 0.5848 |
 
 All three then scored in one pass on the full validation split — 308,809
@@ -1249,8 +1251,14 @@ states, byte-identical samples, majority baseline 50.58%:
 | arm | parameters | loss | accuracy | AUC | Brier |
 |---|---|---|---|---|---|
 | **deepsets** | 73,089 | **0.4290** | **78.65%** | **0.8800** | **0.1419** |
+| matched_sorted | 72,549 | 0.4602 | 77.07% | 0.8647 | 0.1517 |
 | matched | 72,549 | 0.4635 | 76.73% | 0.8606 | 0.1533 |
 | wide | 1,649,409 | 0.5325 | 75.83% | 0.8520 | 0.1670 |
+
+**Sorting the rows helps offline, slightly.** `matched_sorted` beats `matched`
+on every metric — 0.4602 against 0.4635, 77.07% against 76.73% — which is what
+removing a nuisance variable from the input should do. It closes about a tenth
+of the distance to DeepSets.
 
 **DeepSets wins all sixteen cells**: best of the three on loss, accuracy, AUC
 and Brier, in every one of the four prestige-clock buckets, without exception.
@@ -1269,6 +1277,8 @@ Game-clustered paired tests over the 1,216 validation games, Bonferroni ×4 —
 |---|---|---|---|---|---|---|
 | deepsets − matched | loss | −0.0293 | 0.0039 | −7.61 | < 1e-9 | 798/1216 |
 | deepsets − matched | accuracy | +1.83 pts | 0.28 | +6.47 | < 1e-9 | 699/1118 |
+| deepsets − matched_sorted | loss | −0.0253 | 0.0038 | −6.60 | < 1e-9 | 758/1216 |
+| deepsets − matched_sorted | accuracy | +1.58 pts | 0.28 | +5.74 | 7.0e-08 | 709/1141 |
 | deepsets − wide | loss | −0.0862 | 0.0064 | −13.48 | < 1e-9 | 799/1216 |
 | deepsets − wide | accuracy | +2.92 pts | 0.33 | +8.90 | < 1e-9 | 772/1159 |
 
@@ -1294,6 +1304,7 @@ Artefacts, all `--seed 0`, `--num-workers 7`, three epochs, batch 256, lr 5e-4:
 |---|---|---|
 | deepsets | `4619288bd96495270b09b1f1e7a1589dded8481a84bfc12fb2faebd4c6ad464a` | 0.4290 |
 | matched | `bbbccfb7b060b2390cc4e02c865d150c72e19d253c4e89cf4fcf79422fa40071` | 0.4635 |
+| matched_sorted | `b71981086314de63932ee93e028a09aa68b8b63e39c82e5005f95805bc685795` | 0.4602 |
 | wide | `26c396d87dee943273501504482ef1f260fd0bec1661ec239a0c3dc6b0806db8` | 0.5325 |
 
 **Memory: the DeepSets arm peaked at 19.3 GB in epoch 3, so `--mem=24G` is the
@@ -1375,6 +1386,7 @@ zeroed:
 |---|---|---|---|
 | deepsets | 73,089 | 19,119 | 26.2% |
 | matched | 72,549 | 44,872 | **61.9%** |
+| matched_sorted | 72,549 | 43,443 | **59.9%** |
 | wide | 1,649,409 | 1,201,515 | **72.8%** |
 
 A parameter-matched model with 61.9% of its weights identically zero is not
@@ -1437,9 +1449,9 @@ Offline metrics are not playing strength — the seed benchmark
 last of six on every offline metric and first on win rate. So the ablation was
 run in games too.
 
-Job 4473540 plus smoke job 4473458,
+Jobs 4473540 and 4473458 (arms 0–2) plus the sorted arm's run,
 [`ablation_benchmark.json`](experiments/configs/ablation_benchmark.json):
-**1,200/1,200 games completed, all clean** — no timeouts, no disqualifications,
+**1,600/1,600 games completed, all clean** — no timeouts, no disqualifications,
 nothing excluded — and every game's loaded model verified against its own row's
 hash, so no arm silently fell back to GameRunner's built-in copy.
 `DeepSetsBotExp` vs SakkirinaSolo, `alpha0 = 0`, 400 games per arm:
@@ -1447,13 +1459,16 @@ hash, so no arm silently fell back to GameRunner's built-in copy.
 | arm | evals/turn | Win rate | 95% CI | as P1 | as P2 |
 |---|---|---|---|---|---|
 | **deepsets** | 7,185 (1.00×) | **78.50%** | 74.21–82.24 | 86.0% | 71.0% |
+| flat_matched_sorted | 6,645 (0.92×) | 53.50% | 48.60–58.33 | 65.5% | 41.5% |
 | flat_matched | 7,474 (1.04×) | 47.50% | 42.65–52.39 | 54.5% | 40.5% |
 | flat_wide | 2,839 (0.40×) | 36.00% | 31.45–40.82 | 46.0% | 26.0% |
 
 **A 1.9-point offline accuracy gap is a 31.0-point win-rate gap in games**
-(deepsets vs flat_matched, z ≈ 9.6). `flat_matched` does not merely lose to the
+(deepsets vs flat_matched, z ≈ 9.1). `flat_matched` does not merely lose to the
 control, it **loses to SakkirinaSolo** — the baseline the DeepSets agent beats
-four times out of five.
+four times out of five. The sorted arm recovers 6 of those 31 points and is the
+only flat arm to finish above 50%; the decomposition is
+[below](#what-the-game-result-establishes).
 
 **Search volume does not explain it.** `flat_matched` ran **1.04× the control's
 evaluations per turn** — slightly *more* search — and still lost by 31 points.
@@ -1485,8 +1500,21 @@ cannot see that. A flat MLP reads its input slot by slot, and does:
 | model | reshuffle sd | ÷ one-move signal | exceeds the one-move gap | flips a winner |
 |---|---|---|---|---|
 | deepsets | **7.9e-08** | ~0× | 0% of steps | 0/150 |
+| flat_matched_sorted | **0** (bit-exact) | 0× | 0% of steps | 0/150 |
 | flat_matched | 0.4159 | **1.27×** | **70%** of steps | 22.7% of states |
 | flat_wide | 0.6574 | **1.32×** | **73%** of steps | 31.3% of states |
+
+The sorted arm is the control for this whole section: same architecture as
+`flat_matched`, same 72,549 parameters, and a reshuffle moves it by **exactly
+zero** because the canonical sort reconstructs the identical input vector.
+Verified on the shipped export with
+`tools/analyze_order_sensitivity.py invariance`, which reports sd 0 and
+max |diff| 0 for the sorted arm against **about 0.39–0.42** for `flat_matched`
+on the same states — 0.390 on the cluster over 60 states of the full validation
+split, 0.418 and 0.416 locally at 60 and 150 states. The spread is the state
+sample, not the measurement, and nothing here turns on which figure is used:
+the unsorted model moves by roughly 0.4 in logit and the sorted one by exactly
+0.
 
 DeepSets' figure is not identically zero and the reason is worth stating
 precisely: it is permutation-invariant *mathematically*, but permuting the rows
@@ -1528,57 +1556,76 @@ python tools/analyze_order_sensitivity.py all --data-dir "$SPLIT/val" \
     --onnx wide=.../FlatValueNetwork_wide_seed_00.onnx
 ```
 
-### What the game result does and does not establish
+### What the game result establishes
 
-**The 31 points are real and confounded.** Real: 1,200 clean games, every model
-hash-verified per row, more search for the losing arm, no feature-extraction
-bug. Confounded: the gap mixes **evaluator quality** with **the absence of
-permutation invariance under determinisation**, and this experiment cannot
-separate them.
+The sorted arm was built to split the 31 points into its two parts, and it
+does. Both comparisons are two-proportion *z* tests on 400 games each:
 
-So the supported claim is the narrower one: **permutation invariance matters in
-this search.** "The set structure is a better evaluator" is what the offline
-result supports, at 1.9 points measured and ~3.4 corrected — not at 31.
+| comparison | Δ win rate | *z* | *p* | reading |
+|---|---|---|---|---|
+| sorted − matched | **+6.0 pts** | 1.70 | 0.09 | what permutation invariance buys |
+| deepsets − sorted | **+25.0 pts** | 7.7 | < 1e-13 | what the set encoder buys on top |
 
-**The fourth arm settles it.** `flat-matched-sorted` is the same network and
-the same 72,549 parameters as `flat_matched`, with the node rows put into a
-canonical order before flattening, inside the model, so training, offline
-scoring and ONNX inference share one definition and no C# code changes.
-Verified permutation-invariant by construction, and here the invariance *is*
-bit-exact: the sort produces the identical input vector, so the identical
-arithmetic runs, and reshuffling changes the flattened vector and the exported
-graph's output by **exactly 0** — a stronger guarantee than DeepSets itself
-offers, whose mean-pool leaves ~1e-6 of float32 reassociation. It is trained with `ARCH=matched_sorted` and benchmarked as
-task ids 1200–1599, appended so the first three arms' ids and results are
-untouched. **Its results are pending**; until they land, the difference between
-it and `flat_matched` is the unmeasured quantity this section turns on.
+**Permutation invariance recovers a fifth of the gap, and the estimate is not
+significant.** Point estimate 19% of the 31 points; the 95% interval on
+sorted − matched runs from −0.9 to +12.9 points, so the recoverable share is
+somewhere in **roughly 0–40%**. At 400 games this experiment cannot distinguish
+"invariance is worth a few points" from "invariance is worth nothing". What it
+can rule out is that invariance explains most of the gap.
 
-```bash
-ARCH=matched_sorted OUT_ROOT="$HPCWORK/tot_ablation/matched_sorted" \
-    sbatch --array=0 scripts/slurm_train.sh
+**Most of the game advantage is the set encoder, not invariance.** 25.0 points
+separate DeepSets from a flat model that is permutation-invariant *by
+construction*, at **0.92× the control's search** — near-equal effort, and what
+mismatch there is runs against DeepSets. That comparison has no ordering
+confound left in it: both arms see an input that is unchanged by
+determinisation, verified bit-exact for the sorted arm and to ~1e-6 for
+DeepSets.
 
-# CONFIRM THE EXPORT CARRIES THE SORT before benchmarking it. An export made
-# with the wrong --arch passes its own verification -- the PyTorch reference it
-# checks against is built from the same wrong arch -- so this is the check that
-# catches it, and it needs nothing but the .onnx.
-python tools/analyze_order_sensitivity.py invariance --data-dir "$SPLIT/val" \
-    --onnx sorted="$HPCWORK/tot_ablation/matched_sorted/seed_00/FlatValueNetwork_matched_sorted_seed_00.onnx" \
-    --onnx matched="$HPCWORK/tot_ablation/matched/seed_00/FlatValueNetwork_matched_seed_00.onnx" \
-    --expect-invariant sorted
+So the claim the previous version of this section withheld is now supported:
+**the set structure is a better evaluator for this agent**, and by most of the
+margin. Sorting was the fair version of the flat baseline and it is still
+beaten by 25 points.
 
-# then add its ONNX sha256 to ablation_benchmark.json and submit 1200-1599
-```
+#### Offline metrics understate playing differences by an order of magnitude
 
-**The arch is not recoverable from a flat checkpoint's weights.** `matched` and
-`matched_sorted` have identical widths and identical parameter counts, and
-differ only in whether the rows are sorted — which lives in a plain attribute,
-not in the `state_dict`. `tools/evaluate_checkpoints.py` therefore reads the
-arch from the `run_config.json` beside the checkpoint's *real* path (following
-symlinks), accepts `--arch PATH=ARCH` as an override, and **refuses to score a
-flat checkpoint whose arch it cannot establish** rather than defaulting to
-`matched`. `training/export_flat_to_onnx.py` resolves it the same way and has
-no default either. Both print the resolved arch and where it came from, and it
-is recorded in the JSON output and in the per-state CSV's `#` preamble.
+With invariance equalised, the two arms differ offline by **1.58 accuracy
+points and 0.025 loss** — and by **25.0 win-rate points** in games. That is the
+same disagreement the
+[seed benchmark](#seed-benchmark-results) found from the other direction, where
+the shipped model was last of six on every offline metric and first on win
+rate, and where seed 4 was best on accuracy and AUC and the weakest player.
+
+Two independent experiments, on different models, both say offline validation
+metrics are a poor proxy for playing strength at these margins. The ablation
+adds the magnitude: a gap that looks like 1.6 accuracy points is worth 25 points
+of win rate. A checkpoint selected on validation loss is being selected on
+something only loosely related to what it will do in a game — which is the
+argument for the seed benchmark and this game benchmark existing as separate
+experiments rather than being inferred from `evaluate_checkpoints.py` output.
+
+#### Why the set encoder still wins: a mechanism, not a finding
+
+Canonical sorting is **one** route to permutation invariance, and it buys
+invariance at a cost the set encoder does not pay. The sort is a discontinuous
+function of the input: a small change to the board — one card bought, one
+drawn — can move a row past its neighbours in the key ordering and shift every
+row after it, so a flat model's input vector can change in many slots at once
+between two positions one move apart. Mean-pooling has no such discontinuity;
+adding or removing a card changes the pooled vector smoothly.
+
+If that is what is happening, the sorted model would be **less smooth between
+neighbouring positions** than DeepSets, and a search comparing candidate moves
+would suffer for it. That is a plausible mechanism and **it is not established
+here** — nothing in this section measures it.
+
+The test that would settle it is a **neighbouring-position ranking metric**:
+take consecutive states within a game, or the candidate successors of one
+position, and measure how well each model's ordering of them agrees with the
+eventual outcome — a rank correlation over the successors of a position, rather
+than accuracy over unrelated states. `tools/analyze_order_sensitivity.py`
+already extracts the one-move scale this would build on. Until someone runs it,
+"the sort is discontinuous and that costs the flat model in search" is a
+hypothesis consistent with the numbers, not a result.
 
 No C# encoder and no bot were needed for any of this: the exported graph takes
 the same `(node_features, global_features)` inputs as the DeepSets model and
