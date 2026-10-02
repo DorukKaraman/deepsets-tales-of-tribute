@@ -677,10 +677,6 @@ Two more matchups were appended on the cluster in August as **matchups 10 and
 
 Neither is significant: the two submitted agents are not distinguishable head
 to head at 400 games. The paper cites the first row.
-<!-- TODO before release: these two matchups were run but never committed.
-     Append both at the END of experiments/configs/legacy_paper_benchmark.json
-     (task ids 4000-4799) so the 54.5% is reproducible from the repo, then
-     delete this comment. -->
 
 **Before trusting any result, confirm the model actually loaded.** Both
 harnesses verify the ONNX hash in `GameRunner`'s output before running a single
