@@ -124,8 +124,9 @@ deficit much larger:
 
 The cluster figure is stock timing, `alpha0 = 0`, `DeepSetsBotExp` vs
 `SakkirinaScaled` at `SOT_BASELINE_TIME_SCALE = 1.0`. Per-game variance is large
-— the local per-game ratio ranged 3.28× to 19.64× over 6 games — which is why
-the calibration pools 60.
+— the per-game ratio ranged 0.80× to 30.4× across the 60 calibration games
+(3.28× to 19.64× over the 6 local ones) — which is why the calibration pools
+60 games and reports a ratio of means.
 
 Rather than recalibrate `SakkirinaHalf`, the effort-matching scale was then
 **measured directly**: `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/7.08) matched the
@@ -255,7 +256,10 @@ Variants of the two agents with genuinely dead code removed: an unused field
 head-to-head against their un-trimmed originals and against the same two
 opponents (see
 [`configs/legacy_paper_benchmark.json`](configs/legacy_paper_benchmark.json),
-which retains both self-play matchups). August cluster run, 400 games each:
+which retains both self-play matchups). August cluster run, 400 games each.
+These come from the old repository, on the engine before the tallying-only
+change, with the shipped model pinned (`86e0f9a8…`); the tallying change does
+not affect play.
 
 | Matchup | Win rate | 95% CI |
 |---|---|---|

@@ -657,12 +657,16 @@ decoration, it is the check for a seat-swap inversion bug, which would drag the
 aggregate toward a plausible-looking 50% while leaving the two per-seat rates
 visibly disagreeing.
 
-Scale and runtime: the original configuration is 10 matchups × 400 games = 4000
-games, one game per task. In August they ran through the batched wrapper
-(section 7) at up to 80 concurrent tasks: about **45 s per game** against
-SakkirinaSolo and **76 s** against MCTSBot. The job's total wall clock was not
-recorded precisely. A plain one-task-per-element array of 4000 is rejected on a
-default RWTH account; see [Job limits](#job-limits-on-a-default-rwth-account).
+Scale and runtime: the configuration is 12 matchups × 400 games = 4800 games
+(the original 10 plus the 2 cross matchups below, appended at the end), one game
+per task. In August they ran through an equivalent hand-written batched wrapper
+in the old repository (the same idea as `scripts/slurm_experiment_batched.sh`,
+section 7) at up to 80 concurrent tasks. Games against MCTSBot averaged **76 s**
+over 400 games; for SakkirinaSolo, use the later 400-game runs at 10 s, which
+averaged **55–60 s per game** (seed benchmark). The August job's total wall
+clock was not recorded precisely. A plain one-task-per-element array of 4800 is
+rejected on a default RWTH account; see
+[Job limits](#job-limits-on-a-default-rwth-account).
 Resumable — a task with no result file is retried.
 
 #### The two cross matchups
@@ -776,9 +780,11 @@ dotnet build Bots/Bots.csproj       -c Release
 dotnet build GameRunner/GameRunner.csproj -c Release
 mkdir -p logs                                     # SLURM will NOT create this for you
 
-# scripts/slurm_experiment.sh defaults REPO_ROOT to this path. If you cloned
-# somewhere else, edit it there too, or every array task will look in the wrong
-# place.
+# scripts/slurm_experiment.sh and scripts/slurm_experiment_batched.sh each
+# hard-code REPO_ROOT to this path (the batched one calls the other). If you
+# cloned somewhere else, edit BOTH, or every task will look in the wrong place.
+# Submit from the repo root: the batched script's --output/--error are
+# relative (logs/expb_...).
 export OUT_DIR=$HOME/tot/experiment_results
 
 # --- 1. alpha sweep ---
@@ -826,9 +832,20 @@ sbatch --export=ALL,SOT_EXP_CONFIG=ablation_benchmark,START_TASK=1200,TOTAL_TASK
 python tools/aggregate_benchmark_results.py --config ablation_benchmark --out-dir "$OUT_DIR/ablation_benchmark"
 ```
 
-These are the submissions that were actually run. `alpha_sweep` and
-`time_scaling` ran concurrently, as 50 + 49 = 99 submitted elements, just under
-the account limit below.
+These reproduce what was run. Steps 1–3 are the exact submissions; two
+experiments were split differently at the time:
+
+- **Seed benchmark:** first all 2400 tasks (job 4457064, `--time=03:00:00`).
+  Its seed rows were invalid (unflushed exports, see section 3); its shipped
+  row, tasks 2000–2399, is the one reported. The seed rows were then rerun
+  alone with `TOTAL_TASKS=2000 --time=02:00:00` (job 4459158).
+- **Ablation benchmark:** first the three original arms
+  (`TOTAL_TASKS=1200 --time=01:30:00`), then the sorted arm on its own
+  (`START_TASK=1200,TOTAL_TASKS=1600 --time=01:00:00`), which is the sub-range
+  example above.
+
+`alpha_sweep` and `time_scaling` ran concurrently, as 50 + 49 = 99 submitted
+elements, just under the account limit below.
 
 **`--time` is per array element, and an element runs many games.** At
 `SOT_TIME_SCALE=9.0`, `DeepSetsBotExp` gets an 88.2 s per-turn budget and
