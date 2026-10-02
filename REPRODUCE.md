@@ -630,11 +630,16 @@ tools/benchmark.sh --bot-a DeepSetsBot --bot-b SakkirinaSolo \
 `--fast` is `--timeout 1` and is for iteration only, not for numbers you intend
 to trust.
 
-On a cluster, edit `scripts/slurm_benchmark.sh`, submit, then aggregate:
+On a cluster, submit it through the batched wrapper (a one-task-per-element
+array of 4800 is rejected on a default RWTH account; see
+[Job limits](#job-limits-on-a-default-rwth-account)), then aggregate:
 
 ```bash
+# 4800 tasks over 80 elements = 60 games per element, at ~1 min per game
+sbatch --export=ALL,SOT_EXP_CONFIG=legacy_paper_benchmark,TOTAL_TASKS=4800 \
+    --array=0-79 --time=02:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py \
-    --config legacy_paper_benchmark --out-dir /path/to/results
+    --config legacy_paper_benchmark --out-dir "$OUT_DIR/legacy_paper_benchmark"
 ```
 
 The matchup list, game count and `--timeout` now live in
@@ -802,8 +807,14 @@ python tools/aggregate_benchmark_results.py --config time_scaling --out-dir "$OU
 
 # --- 3. equal effort. Both configs are already calibrated and filled in;
 #        re-calibrate only if the hardware changed, since the ratio depends on it.
-tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
-    --out-dir "$OUT_DIR/equal_effort_baseline_slowed" --calibrate
+#        Calibrate on a COMPUTE node, as a single-core job: on the login node it
+#        would measure different hardware and hit the 20-minute CPU limit.
+#        The reported calibration is this command, at 60 games:
+sbatch --partition=c23ms --time=03:00:00 --ntasks=1 --cpus-per-task=1 --mem=2G \
+    --wrap="source $HOME/tot/env.sh && cd $HOME/tot/deepsets-tales-of-tribute && \
+            tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
+            --out-dir $OUT_DIR/equal_effort_baseline_slowed --calibrate \
+            --calibration-games 60 --skip-build"
 
 # --- 3a. baseline slowed down. Cheap, and the better-matched direction. ---
 #      SOT_BASELINE_TIME_SCALE=0.141 (= 1/r), timeout 12.

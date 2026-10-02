@@ -1,8 +1,10 @@
 # Experiment configs
 
 One JSON file per experiment. `tools/benchmark_cluster.py` reads it and turns it
-into a SLURM array: **one game per array task, one task per core**, exactly as
-the original hardcoded benchmark did.
+into SLURM tasks: **one game per task, one task per core**, exactly as the
+original hardcoded benchmark did. With the batched wrapper
+(`scripts/slurm_experiment_batched.sh`), each array element runs many tasks in
+sequence; see *Running one* below.
 
 | Config | What it asks | Matchups × games | Tasks |
 |---|---|---|---|
@@ -111,7 +113,7 @@ off, since every bot then loads the built-in copy that layer 1 already pinned.
 Always print the plan first — it gives each matchup's exact task-id range:
 
 ```bash
-tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR" --dry-run
+tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep" --dry-run
 ```
 
 Then submit, and aggregate with the **same** `--config`:
@@ -169,12 +171,16 @@ better-matched of the two — and let the sped-up one confirm it.
 ## Calibration
 
 ```bash
-tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR" --calibrate
+tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR/equal_effort" \
+    --calibrate --calibration-games 60
 ```
 
-Runs the config's `calibration` matchups sequentially (20 games by default) and
-reports mean **evaluations per turn** per agent, plus a suggested
-`SOT_TIME_SCALE` for equal effort.
+Runs the config's `calibration` matchups sequentially (20 games unless
+`--calibration-games` says otherwise) and reports mean **evaluations per turn**
+per agent, plus a suggested `SOT_TIME_SCALE` for equal effort. **Run it on a
+compute node**, as a single-core job: on the login node it measures different
+hardware and hits the 20-minute CPU limit. The `sbatch --wrap` form that
+produced the reported n = 60 calibration is in REPRODUCE.md, section 7, step 3.
 
 Calibrate at `SOT_ALPHA0=0`, which both equal-effort configs pin — **the
 experiment is about the network as an evaluator, so calibrate on the same agent
