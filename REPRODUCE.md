@@ -96,6 +96,30 @@ Every cluster figure in this document was measured on RWTH CLAIX-2023,
 partition `c23ms`: Intel Xeon Platinum 8468, 2 sockets × 48 cores per node, one
 game per core.
 
+**.NET on the cluster is a per-user install, and the job scripts need to be told
+where it is.** CLAIX has no .NET module, so the SDK was installed into the home
+directory with Microsoft's install script — SDK **8.0.423**, runtime **8.0.29**:
+
+```bash
+curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+bash dotnet-install.sh --channel 8.0 --install-dir $HOME/dotnet
+mkdir -p $HOME/tot
+cp scripts/env.example.sh $HOME/tot/env.sh
+```
+
+`scripts/slurm_experiment.sh` (and through it `slurm_experiment_batched.sh`) and
+`scripts/slurm_benchmark.sh` run `source $HOME/tot/env.sh` at the top of every
+job. Skip the `cp` and every job fails with `dotnet: command not found`. The file
+is sourced deliberately rather than put in `.bashrc`: SLURM batch shells are
+non-interactive and do not read `.bashrc`, so a `PATH` set there works on the
+login node, where you test, and is missing in every job, where it matters.
+
+`scripts/slurm_generate.sh` is the exception — it does **not** source the file.
+It relies on `sbatch`'s default `--export=ALL` carrying the submitting shell's
+environment into the job, so run `source $HOME/tot/env.sh` in that shell before
+`sbatch scripts/slurm_generate.sh`. The same applies to the `dotnet build` steps
+on the login node.
+
 ```bash
 ./scripts/setup_python_env.sh                # pinned, CPU-only venv
 source .venv/bin/activate
@@ -177,11 +201,34 @@ independent cross-check).
 cd training
 python generate_db.py        # Engine/cards.json -> card_db.py
 python verify_card_db.py     # audits the parse; read its output, do not skip
-python generate_cs_db.py     # card_db.py -> the C# table
+python generate_cs_db.py     # card_db.py -> training/CardDatabase.cs (reference copy)
 ```
 
 `verify_card_db.py` reports every place the parse could silently drop an
 effect. It is read-only.
+
+**The generated `CardDatabase.cs` is a reference copy, and nothing builds it.**
+`generate_cs_db.py` writes a standalone file into the current directory —
+`training/`, given the commands above — which no project references. The table
+the agents actually use is embedded in `Bots/src/DeepSetsCore.cs` as
+`public static class CardDatabase`, 125 cards × 76 effect values, and that file
+is frozen as submitted. So regenerating does not change what the agents play
+with; it produces something to check the embedded table *against*.
+
+That comparison is the test that the card database has not drifted from
+`Engine/cards.json`:
+
+```bash
+diff <(grep -o '{ (CardId)[0-9]*, new float\[\] {[^}]*}' training/CardDatabase.cs) \
+     <(grep -o '{ (CardId)[0-9]*, new float\[\] {[^}]*}' Bots/src/DeepSetsCore.cs) \
+  && echo "card database matches the embedded table"
+```
+
+**Regenerating reproduces the embedded table exactly** — all 125 entries, 76
+values each, an empty diff. The check is not vacuous: changing a single one of
+the 9,500 values makes the diff fail. Delete `training/CardDatabase.cs`
+afterwards; it is not ignored by git and would otherwise show up as an
+untracked file.
 
 Runtime: seconds.
 
@@ -362,7 +409,7 @@ export, so the losses below belong to exactly the weights each seed trained.
 
 **Results.**
 
-| Seed | Val loss (re-scored) | ONNX SHA-256 (flushed re-export — the current files) |
+| Seed | Val loss (re-scored) | ONNX SHA-256 (flushed re-export — the files measured; not distributed) |
 |---|---|---|
 | 0 | **0.4343** | `b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258` |
 | 1 | 0.4419 | `1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df` |
@@ -740,9 +787,12 @@ pilot at *r* = 7.08 undershot, and 9.0 was chosen empirically from that pilot.
 The baseline-slowed direction needed a pilot too. Its first scale, **0.2**, was
 predicted from `time_scaling` and overshot: over 40 games the baseline ran
 **10,544** evaluations per turn against DeepSets' **7,088**. The calibrated
-**0.141** (= 1/*r*) then matched within 3 %. The 40 pilot games are archived,
-with the 60 calibration games, at
-`experiment_results/calibration/pilot_baseline_scale_0.2/`.
+**0.141** (= 1/*r*) then matched within 3 %. The 40 pilot games and the 60
+calibration games are **not distributed** with this repository (see [Known
+limitations](#known-limitations)). Rerunning `--calibrate` writes its per-game
+files under `<out-dir>/calibration/matchup_NN_<label>/`; the authors' own copy
+of this pilot was filed by hand as `calibration/pilot_baseline_scale_0.2/`, which
+is a naming convention, not a path you will find here.
 
 Both directions ended with DeepSets doing slightly less work than the baseline
 (0.97× and 0.88×), so in both the residual mismatch runs **against** the DeepSets
@@ -1176,10 +1226,24 @@ at all, where the other three each required choosing a scale, a budget or a
 matching criterion. See [Search volume: four experiments, one
 answer](#search-volume-four-experiments-one-answer).
 
-The first run's per-game files are archived at
-`experiment_results/calibration/seed_benchmark_unflushed_seeds/`, with a
-`README.txt` marking them invalid as win rates. They remain valid as the other
-arm of this comparison, which is the reason to keep them.
+The first run's per-game files are **not distributed** (see [Known
+limitations](#known-limitations)). The authors kept them, filed as
+`calibration/seed_benchmark_unflushed_seeds/` with a `README.txt` marking them
+invalid as win rates — they remain valid as the other arm of this comparison,
+which is the reason they were kept rather than deleted.
+
+Note what that means for reproducing this subsection specifically. Rerunning
+`seed_benchmark.json` as it stands reproduces only the *second* arm: the
+unflushed exports were superseded, and their hashes were deliberately removed
+from `allowed_onnx_sha256` so that they cannot be benchmarked by accident. The
+experiment is reproducible **in kind** rather than as these exact files — export
+each seed checkpoint twice, once with `training/export_to_onnx.py --no-flush` and
+once with the default flush, add both sets of hashes to a config, and run the two
+against the same 400 games. Since the flush changes speed and nothing else, that
+recreates the comparison. On x86-trained checkpoints the unflushed export is the
+slow one; trained on Apple Silicon there may be no subnormal weights to flush,
+and then no speed difference to measure (see [Denormal
+flushing](#denormal-flushing-and-why-the-export-is-platform-dependent)).
 
 ### Search volume: four experiments, one answer
 
@@ -1722,6 +1786,34 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   [Which numbers come from where](#which-numbers-come-from-where).
 - **The shipped model's training metrics and wall-clock cost were not
   recorded.** Only the checkpoint and the exported ONNX survive from that run.
+- **Experiment artefacts are not distributed — only two models are.** `models/`
+  holds the submitted model (`deepsets_value_network.pth` and its export
+  `DeepSetsValueNetwork.onnx`) and the heuristic-only ablation checkpoint
+  (`ablation_heuristic_only.pth`, with its training metrics), each listed in
+  `models/SHA256SUMS`. Nothing else is. The five per-seed models, the four
+  flat-MLP ablation models, the per-game result files from every experiment in
+  [section 7](#7-paper-experiments) and [section 8](#8-flat-mlp-ablation), the
+  calibration and pilot games, and the per-state predictions behind the
+  clustered tests are **not** in this repository, and their absence is
+  deliberate rather than an omission.
+
+  Every reported number is given in this document, and each can be regenerated
+  with the scripts and configs here: `scripts/slurm_train.sh` for the models,
+  `experiments/configs/` and `tools/benchmark_cluster.sh` for the games,
+  `tools/aggregate_benchmark_results.py` for the win rates,
+  `tools/evaluate_checkpoints.py` for the offline scores, and
+  `tools/clustered_significance.py` for the game-clustered tests. Paths such as
+  `$HPCWORK/tot_models/` and `$HPCWORK/tot_ablation/` are where those scripts
+  write, not files that ship.
+
+  The SHA-256 hashes listed for the seed and ablation models identify the files
+  that were measured. A retrained model will have a different hash and should
+  behave comparably rather than identically, since training is not bit-exact
+  across hardware (see [section 3](#3-train)). One result is reproducible only
+  in kind: the accidental paired comparison in the seed benchmark, whose first
+  arm used exports that were later superseded — see [the invalid first
+  run](#the-invalid-first-run-is-an-accidental-paired-experiment) for how to
+  recreate it.
 - **The shipped model and the five seed models were each trained on a
   non-uniform subset of the shards, a different one every epoch.**
   `training/stream_dataset.py` shuffled the shard list with each worker's *own*
