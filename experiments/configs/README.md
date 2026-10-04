@@ -1,8 +1,10 @@
 # Experiment configs
 
 One JSON file per experiment. `tools/benchmark_cluster.py` reads it and turns it
-into a SLURM array: **one game per array task, one task per core**, exactly as
-the original hardcoded benchmark did.
+into SLURM tasks: **one game per task, one task per core**, exactly as the
+original hardcoded benchmark did. With the batched wrapper
+(`scripts/slurm_experiment_batched.sh`), each array element runs many tasks in
+sequence; see *Running one* below.
 
 | Config | What it asks | Matchups × games | Tasks |
 |---|---|---|---|
@@ -11,12 +13,14 @@ the original hardcoded benchmark did.
 | [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up; landed at 0.88 of the baseline's effort (43,139 vs 49,131 evals/turn). | 1 × 400 | 400 |
 | [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheaper; matched to within 3 % (6,433 vs 6,627 evals/turn). | 1 × 400 | 400 |
 | [`seed_benchmark.json`](seed_benchmark.json) | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. **Needs two path substitutions first.** | 6 × 400 | 2400 |
-| [`ablation_benchmark.json`](ablation_benchmark.json) | Does the DeepSets structure win *games*, or only validation loss? The three flat-MLP ablation arms (REPRODUCE.md §9). **Needs one path substitution first.** | 3 × 400 | 1200 |
-| [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly. | 10 × 400 | 4000 |
+| [`ablation_benchmark.json`](ablation_benchmark.json) | Does the DeepSets structure win *games*, or only validation loss? A DeepSets control and three flat-MLP arms, including a permutation-invariant one (REPRODUCE.md §8). **Needs one path substitution first.** | 4 × 400 | 1600 |
+| [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly, plus the 2 cross matchups appended at the end. | 12 × 400 | 4800 |
 
 `legacy_paper_benchmark.json` is the previously-hardcoded list: same order, same
 seeds, same task ids, same result directory names, so an in-flight run of the
-old harness resumes across the config rework. Do not reorder or extend it.
+old harness resumes across the config rework. Matchups 10–11 (task ids
+4000–4799) were appended at the end: they were run in August 2026 alongside the
+original ten but never committed. Do not reorder it; extend only at the end.
 
 ## The format
 
@@ -64,8 +68,9 @@ fall back to the bot's own default and produce 400 games labelled as an
 experiment that was never performed — indistinguishable, afterwards, from a real
 result. `--dry-run` still prints the plan and `--calibrate` still runs, because
 those are how the value gets filled in. Both `equal_effort*.json` configs were
-built this way and are now filled in; nothing currently ships with a
-placeholder.
+built this way and are now filled in; no config currently ships with a `TBD`.
+(`seed_benchmark.json` and `ablation_benchmark.json` do ship with *path*
+placeholders, which the table above flags; those are a different thing.)
 
 **The ONNX pin has three layers, and the guarantee is per row.** A bot whose
 model fails to load does not crash — it logs the failure, falls back, and plays
@@ -108,15 +113,22 @@ off, since every bot then loads the built-in copy that layer 1 already pinned.
 Always print the plan first — it gives each matchup's exact task-id range:
 
 ```bash
-tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR" --dry-run
+tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep" --dry-run
 ```
 
 Then submit, and aggregate with the **same** `--config`:
 
 ```bash
-sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep --array=0-1999%32 scripts/slurm_experiment.sh
+sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep,TOTAL_TASKS=2000 \
+    --array=0-49 --time=04:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep"
 ```
+
+A one-task-per-element array (`--array=0-1999%32` with
+`scripts/slurm_experiment.sh`) is rejected on a default RWTH account, which
+allows only 100 submitted jobs. The batched wrapper and the exact submissions
+for every config are in REPRODUCE.md, section 7, under *Job limits*. Plain
+`slurm_experiment.sh --array=<ids>` is fine for small runs under 100 tasks.
 
 Resubmitting is always safe: a task whose result file exists is skipped without
 running anything.
@@ -133,7 +145,7 @@ the baseline-slowed config takes its **reciprocal**.
 | | setting | keeps fixed | achieved over 400 games | distortion | cost |
 |---|---|---|---|---|---|
 | `equal_effort_baseline_slowed` | `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/*r*), timeout 12 | treatment at stock timing | **6,433 vs 6,627** evals/turn — within 3 % | baseline runs at ~1/7 of the budget it was tuned for, and a hand-tuned heuristic may degrade non-linearly | a normal row |
-| `equal_effort` | `SOT_TIME_SCALE = 9.0`, timeout 91 | baseline at stock timing | **43,139 vs 49,131** evals/turn — DeepSets at **0.88** of the baseline's effort | the treatment gets an 88.2 s/turn budget no tournament would give it | ~120 core-hours / 400 games |
+| `equal_effort` | `SOT_TIME_SCALE = 9.0`, timeout 91 | baseline at stock timing | **43,139 vs 49,131** evals/turn — DeepSets at **0.88** of the baseline's effort | the treatment gets an 88.2 s/turn budget no tournament would give it | ~25–30 core-hours / 400 games (measured; games took 2–6 min) |
 
 Figures are `DeepSetsBotExp` vs `SakkirinaScaled`. **Quote the achieved numbers,
 not *r*** — only the baseline-slowed direction is matched, and the sped-up one
@@ -159,12 +171,16 @@ better-matched of the two — and let the sped-up one confirm it.
 ## Calibration
 
 ```bash
-tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR" --calibrate
+tools/benchmark_cluster.sh --config equal_effort --out-dir "$OUT_DIR/equal_effort" \
+    --calibrate --calibration-games 60
 ```
 
-Runs the config's `calibration` matchups sequentially (20 games by default) and
-reports mean **evaluations per turn** per agent, plus a suggested
-`SOT_TIME_SCALE` for equal effort.
+Runs the config's `calibration` matchups sequentially (20 games unless
+`--calibration-games` says otherwise) and reports mean **evaluations per turn**
+per agent, plus a suggested `SOT_TIME_SCALE` for equal effort. **Run it on a
+compute node**, as a single-core job: on the login node it measures different
+hardware and hits the 20-minute CPU limit. The `sbatch --wrap` form that
+produced the reported n = 60 calibration is in REPRODUCE.md, section 7, step 3.
 
 Calibrate at `SOT_ALPHA0=0`, which both equal-effort configs pin — **the
 experiment is about the network as an evaluator, so calibrate on the same agent

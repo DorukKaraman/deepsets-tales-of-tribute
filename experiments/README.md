@@ -91,53 +91,49 @@ time-scaling study and the equal-effort control.
 
 ---
 
-## The search-volume control
+## Superseded: the `SakkirinaHalf` search-volume control
 
-`SakkirinaHalf` — not a file here; it ships as
-[`scripts/sakkirina_half.patch`](../scripts/sakkirina_half.patch) and is
-produced by `scripts/fetch_baselines.sh`, because it is 96% verbatim
-SakkirinaSolo and redistributing it as source would be republishing someone
-else's competition entry (see the README's
+**`SakkirinaHalf` is not used for any reported result.** It is kept, as
+[`scripts/sakkirina_half.patch`](../scripts/sakkirina_half.patch) produced by
+`scripts/fetch_baselines.sh`, only so the history below can be checked. It ships
+as a patch for the same reason `SakkirinaScaled` does: it is 96% verbatim
+SakkirinaSolo (see the README's
 [derived work versus redistribution](../README.md#derived-work-versus-redistribution)).
+[`configs/equal_effort_baseline_slowed.json`](configs/equal_effort_baseline_slowed.json)
+replaces it.
 
-**The confound.** `DeepSetsBot` evaluates far fewer positions per game than
-`SakkirinaSolo` does — roughly 102,700 against 226,100 — because a neural
-forward pass costs more than a hand-written heuristic. So a sceptic can
-reasonably ask whether the win rate reflects a better evaluation function or
-merely two agents searching different volumes.
+**What it was for.** `DeepSetsBot` evaluates far fewer positions than
+`SakkirinaSolo`, so a sceptic can ask whether the win rate reflects a better
+evaluation function or merely two agents searching different volumes.
+`SakkirinaHalf` was `SakkirinaSolo` with its per-move time budget scaled by
+`HALF_STRENGTH_FACTOR = 0.45`, to reproduce that deficit without swapping the
+evaluator.
 
-**The control.** `SakkirinaHalf` is `SakkirinaSolo` with its per-move time
-budget scaled by 0.45 and nothing else changed. It reproduces the throughput
-deficit without also swapping the evaluator, which isolates search volume from
-evaluation quality.
+**Why it was superseded: 0.45 was calibrated to a deficit that does not
+reproduce.** It is exactly 102,734 / 226,057, a historical evaluations-per-game
+ratio of 2.20× whose measurement conditions (hardware, ONNX Runtime version,
+engine `--timeout`) cannot be recovered, and whose source agent
+(`SakkirinaNeural`) is no longer in the tree. Every later measurement put the
+deficit much larger:
 
-> **⚠ The 102,700 / 226,100 figures did not reproduce, and `HALF_STRENGTH_FACTOR
-> = 0.45` is derived from them.** 0.45 is exactly 102,734 / 226,057. Re-measured
-> on 2026-09-22 with the counters verified equivalent (see
-> [Counting evaluations](#counting-evaluations) below):
->
-> | | historical | re-measured | |
-> |---|---|---|---|
-> | `DeepSetsBot` (frozen), evals/game | 102,734 | 112,725 | **1.10x** |
-> | stock-timing baseline, evals/game | 226,057 | 635,910 | **2.81x** |
-> | ratio | 2.20x | 5.64x | |
->
-> Pooled over 6 games, `DeepSetsBot` vs `SakkirinaScaled` at
-> `SOT_BASELINE_TIME_SCALE=1.0`, `--timeout 10`. **The neural side reproduces;
-> the heuristic baseline does not.** The cause is not identified — the repository
-> is a single squashed commit, so the measurement conditions behind the
-> historical figures (hardware, ONNX Runtime version, engine `--timeout`) cannot
-> be recovered, and the agent they were taken from (`SakkirinaNeural`) is no
-> longer in the tree.
->
-> If the deficit is really ~1/5.6 rather than ~1/2.2, then 0.45 does not
-> reproduce it and `SakkirinaHalf` is calibrated to the wrong point (~0.18 would
-> be the equivalent). **Re-measure on the cluster before reporting anything that
-> depends on 0.45.** The patch is deliberately left untouched pending that
-> measurement, so the control keeps producing the same agent it always did.
->
-> Per-game variance is large — the ratio ranged 3.28x to 19.64x across those 6
-> games — so use a pooled figure over ≥20 games, not a mean of per-game ratios.
+| Measurement | n | `DeepSetsBot` | baseline | ratio |
+|---|---|---|---|---|
+| historical, evals/game | ? | 102,734 | 226,057 | 2.20× |
+| local re-measure (2026-09-22), evals/game | 6 | 112,725 | 635,910 | 5.64× |
+| **cluster calibration**, evals/turn | **60** | **6,428** | **45,479** | **7.08×** (per game 7.06×) |
+
+The cluster figure is stock timing, `alpha0 = 0`, `DeepSetsBotExp` vs
+`SakkirinaScaled` at `SOT_BASELINE_TIME_SCALE = 1.0`. Per-game variance is large
+— the per-game ratio ranged 0.80× to 30.4× across the 60 calibration games
+(3.28× to 19.64× over the 6 local ones) — which is why the calibration pools
+60 games and reports a ratio of means.
+
+Rather than recalibrate `SakkirinaHalf`, the effort-matching scale was then
+**measured directly**: `SOT_BASELINE_TIME_SCALE = 0.141` (= 1/7.08) matched the
+two agents' evaluations per turn to within 3 %. (The ~0.18 that this file
+previously estimated from the local ratio was close, but it was not the
+matching point.) The patch itself is deliberately left untouched, so it still
+produces the agent it always did.
 
 ## Counting evaluations
 
@@ -232,7 +228,13 @@ accounting quirk.
 Caveat on the local measurement: at n=6 the per-seed evals/turn ratios were
 0.45, 4.47, 0.70, 0.71, 1.82, 1.98 — three down, three up. It confirms the
 mechanism and rules out a counting artefact; it does not on its own establish
-the monotone rise. That comes from the 400-game cluster runs.
+the monotone rise. That comes from the 400-game cluster runs of the alpha sweep:
+
+| alpha0 | 0.0 | 0.3 | 0.5 | 0.7 | 0.9 |
+|---|---|---|---|---|---|
+| evaluations per turn | 6,722 | 7,595 | 7,955 | 8,605 | 9,669 |
+
+Monotone, and **1.44× from 0.0 to 0.9**, against 1.12× in the n=6 local pair.
 
 **The neural agent is not ONNX-bound.** The frozen `DeepSetsBot`'s own
 telemetry puts only **13–31 %** of wall clock inside
@@ -251,10 +253,28 @@ Variants of the two agents with genuinely dead code removed: an unused field
 `Compare` override — 41 lines across each file, none of them reachable.
 
 **The result is a null result, and that is the point.** They were benchmarked
-head-to-head against their un-trimmed originals (see
+head-to-head against their un-trimmed originals and against the same two
+opponents (see
 [`configs/legacy_paper_benchmark.json`](configs/legacy_paper_benchmark.json),
-which retains both self-play matchups) and measured as equivalent. The trimming
-changes nothing about play; it confirms the dead code was in fact dead.
+which retains both self-play matchups). August cluster run, 400 games each.
+These come from the old repository, on the engine before the tallying-only
+change, with the shipped model pinned (`86e0f9a8…`); the tallying change does
+not affect play.
+
+| Matchup | Win rate | 95% CI |
+|---|---|---|
+| `DeepSetsBot` vs `DeepSetsBotTrim` | 53.8% | 48.9–58.6 |
+| `DeepSetsBlendBot` vs `DeepSetsBlendBotTrim` | 49.8% | 44.9–54.6 |
+
+| Opponent | `DeepSetsBot` | `DeepSetsBotTrim` | `DeepSetsBlendBot` | `DeepSetsBlendBotTrim` |
+|---|---|---|---|---|
+| SakkirinaSolo | 76.3% | 76.5% | 77.0% | 75.0% |
+| MCTSBot | 88.5% | 88.0% | 88.3% | 85.3% |
+
+Each trimmed agent is **not distinguishable from its original at 400 games**
+(95% intervals of about ±5 points). That is not a proof of equivalence: it
+rules out a large effect, not a small one, which is all a removal of
+unreachable code should need.
 
 Do not treat these as improved versions of the agents. The submitted,
 tournament-playing agents are `Bots/src/DeepSetsBot.cs` and

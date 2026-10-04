@@ -92,6 +92,34 @@ clean / turn_limit / timeout / disqualification.
   `scikit-learn`, `numpy`, `matplotlib`
 - `git` and `patch` (for `scripts/fetch_baselines.sh`)
 
+Every cluster figure in this document was measured on RWTH CLAIX-2023,
+partition `c23ms`: Intel Xeon Platinum 8468, 2 sockets × 48 cores per node, one
+game per core.
+
+**.NET on the cluster is a per-user install, and the job scripts need to be told
+where it is.** CLAIX has no .NET module, so the SDK was installed into the home
+directory with Microsoft's install script — SDK **8.0.423**, runtime **8.0.29**:
+
+```bash
+curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+bash dotnet-install.sh --channel 8.0 --install-dir $HOME/dotnet
+mkdir -p $HOME/tot
+cp scripts/env.example.sh $HOME/tot/env.sh
+```
+
+`scripts/slurm_experiment.sh` (and through it `slurm_experiment_batched.sh`) and
+`scripts/slurm_benchmark.sh` run `source $HOME/tot/env.sh` at the top of every
+job. Skip the `cp` and every job fails with `dotnet: command not found`. The file
+is sourced deliberately rather than put in `.bashrc`: SLURM batch shells are
+non-interactive and do not read `.bashrc`, so a `PATH` set there works on the
+login node, where you test, and is missing in every job, where it matters.
+
+`scripts/slurm_generate.sh` is the exception — it does **not** source the file.
+It relies on `sbatch`'s default `--export=ALL` carrying the submitting shell's
+environment into the job, so run `source $HOME/tot/env.sh` in that shell before
+`sbatch scripts/slurm_generate.sh`. The same applies to the `dotnet build` steps
+on the login node.
+
 ```bash
 ./scripts/setup_python_env.sh                # pinned, CPU-only venv
 source .venv/bin/activate
@@ -173,11 +201,34 @@ independent cross-check).
 cd training
 python generate_db.py        # Engine/cards.json -> card_db.py
 python verify_card_db.py     # audits the parse; read its output, do not skip
-python generate_cs_db.py     # card_db.py -> the C# table
+python generate_cs_db.py     # card_db.py -> training/CardDatabase.cs (reference copy)
 ```
 
 `verify_card_db.py` reports every place the parse could silently drop an
 effect. It is read-only.
+
+**The generated `CardDatabase.cs` is a reference copy, and nothing builds it.**
+`generate_cs_db.py` writes a standalone file into the current directory —
+`training/`, given the commands above — which no project references. The table
+the agents actually use is embedded in `Bots/src/DeepSetsCore.cs` as
+`public static class CardDatabase`, 125 cards × 76 effect values, and that file
+is frozen as submitted. So regenerating does not change what the agents play
+with; it produces something to check the embedded table *against*.
+
+That comparison is the test that the card database has not drifted from
+`Engine/cards.json`:
+
+```bash
+diff <(grep -o '{ (CardId)[0-9]*, new float\[\] {[^}]*}' training/CardDatabase.cs) \
+     <(grep -o '{ (CardId)[0-9]*, new float\[\] {[^}]*}' Bots/src/DeepSetsCore.cs) \
+  && echo "card database matches the embedded table"
+```
+
+**Regenerating reproduces the embedded table exactly** — all 125 entries, 76
+values each, an empty diff. The check is not vacuous: changing a single one of
+the 9,500 values makes the diff fail. Delete `training/CardDatabase.cs`
+afterwards; it is not ignored by git and would otherwise show up as an
+untracked file.
 
 Runtime: seconds.
 
@@ -227,10 +278,19 @@ openings, different play, different outcomes. Retraining on it should land close
 to the shipped model, not on top of it. See
 [Known limitations](#known-limitations).
 
-Runtime: ~80s per game per core for the neural agent, ~48s for the heuristic
-one on cluster hardware. At the template's defaults, ~6000 games across 32
-tasks is **4–5 hours** of wall clock. Regenerating the full combined dataset is
-a working day.
+Runtime, measured with `sacct` over the full runs (32 tasks × 190 games each,
+wall clock per game per core, including per-game process startup):
+
+| Run | Job | Per game | Mean task |
+|---|---|---|---|
+| Heuristic (`SakkirinaGen`) | 2683952 | **72.4 s** | 3 h 49 |
+| Neural (`SakkirinaGenNeural`) | 2792548 | **69.1 s** | 3 h 39 |
+
+The network-guided generator is slightly *faster*, not slower. (Earlier
+versions of this file said ~48 s and ~80 s; the first came from a 2-game smoke
+test and the second from a laptop estimate. Neither is a cluster measurement.)
+At the template's defaults, ~6000 games across 32 tasks is **about 4 hours** of
+wall clock per run, and the full combined dataset is two such runs.
 
 Output size: several GB. It is not in this repository and is not meant to be —
 it is fully regenerable from the above.
@@ -255,7 +315,8 @@ states within one game are highly correlated and share an outcome label, so a
 record-level split leaks: the model partially memorises specific trajectories,
 and the resulting validation accuracy is inflated without looking anomalous.
 
-Runtime: minutes, dominated by I/O.
+Runtime: **3 h 46 on the cluster**, dominated by I/O, with a peak resident set of
+8.0 GiB. Request 16 GB.
 
 ## 3. Train
 
@@ -348,7 +409,7 @@ export, so the losses below belong to exactly the weights each seed trained.
 
 **Results.**
 
-| Seed | Val loss (re-scored) | ONNX SHA-256 (flushed re-export — the current files) |
+| Seed | Val loss (re-scored) | ONNX SHA-256 (flushed re-export — the files measured; not distributed) |
 |---|---|---|
 | 0 | **0.4343** | `b5b8b2bfac57d671b1dbccd0f1f7f60f4ccc95d845462f2a830ebd3922dd1258` |
 | 1 | 0.4419 | `1efc662e08fa2cf2cce82da542d0d891fd66a90f3ad64450a89ce93fcb2512df` |
@@ -409,8 +470,10 @@ recorded. The metrics we *do* ship,
 0.8050, best validation loss 0.4034. Do not attribute those figures to the
 shipped model.
 
-Runtime: hours, hardware-dependent. No figure is given here rather than a
-guessed one.
+Runtime on the cluster, 8 cores, 3 epochs at batch 256: about **75 minutes per
+epoch**. The five seed models took 3 h 03 to 5 h 09 (seed 0: 3 h 48); in the
+flat-MLP ablation the DeepSets control took 3 h 18 and the flat arms 2 h 22 to
+3 h 20. The submitted model's training time was not recorded.
 
 ## 4. Export to ONNX
 
@@ -500,6 +563,10 @@ validation states: max absolute difference exactly 0, zero states differing,
 zero prediction changes. The in-export verification is a second, independent
 check of the same thing, because it compares the *flushed* ONNX against the
 *unflushed* PyTorch model.
+
+Speed was checked the same way. On 5000 real validation states, on x86, the
+flushed `seed_00` runs at **57.7 µs median against 58.6 µs for the shipped
+model (0.98×)**, so the flush brings the seed models back to shipped speed.
 
 > **The shipped model carries the same dead floor.** It contains no subnormal
 > weights, but it does contain **16,017 weights (21.9%) between 1.2e-38 and
@@ -610,11 +677,16 @@ tools/benchmark.sh --bot-a DeepSetsBot --bot-b SakkirinaSolo \
 `--fast` is `--timeout 1` and is for iteration only, not for numbers you intend
 to trust.
 
-On a cluster, edit `scripts/slurm_benchmark.sh`, submit, then aggregate:
+On a cluster, submit it through the batched wrapper (a one-task-per-element
+array of 4800 is rejected on a default RWTH account; see
+[Job limits](#job-limits-on-a-default-rwth-account)), then aggregate:
 
 ```bash
+# 4800 tasks over 80 elements = 60 games per element, at ~1 min per game
+sbatch --export=ALL,SOT_EXP_CONFIG=legacy_paper_benchmark,TOTAL_TASKS=4800 \
+    --array=0-79 --time=02:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py \
-    --config legacy_paper_benchmark --out-dir /path/to/results
+    --config legacy_paper_benchmark --out-dir "$OUT_DIR/legacy_paper_benchmark"
 ```
 
 The matchup list, game count and `--timeout` now live in
@@ -637,9 +709,30 @@ decoration, it is the check for a seat-swap inversion bug, which would drag the
 aggregate toward a plausible-looking 50% while leaving the two per-seat rates
 visibly disagreeing.
 
-Scale and runtime: the cluster configuration is 10 matchups × 400 games = 4000
-games, one per array task, ~60–90s per game, roughly **2.5 hours** of wall
-clock at 32 concurrent tasks. Resumable — a task with no result file is retried.
+Scale and runtime: the configuration is 12 matchups × 400 games = 4800 games
+(the original 10 plus the 2 cross matchups below, appended at the end), one game
+per task. In August they ran through an equivalent hand-written batched wrapper
+in the old repository (the same idea as `scripts/slurm_experiment_batched.sh`,
+section 7) at up to 80 concurrent tasks. Games against MCTSBot averaged **76 s**
+over 400 games; for SakkirinaSolo, use the later 400-game runs at 10 s, which
+averaged **55–60 s per game** (seed benchmark). The August job's total wall
+clock was not recorded precisely. A plain one-task-per-element array of 4800 is
+rejected on a default RWTH account; see
+[Job limits](#job-limits-on-a-default-rwth-account).
+Resumable — a task with no result file is retried.
+
+#### The two cross matchups
+
+Two more matchups were appended on the cluster in August as **matchups 10 and
+11, task ids 4000–4799**, after the original ten, so no existing task id moved:
+
+| Matchup | Win rate | 95% CI | as P1 | as P2 |
+|---|---|---|---|---|
+| `DeepSetsBot` vs `DeepSetsBlendBot` | 54.5% | 49.6–59.3 | 67.0% | 42.0% |
+| `DeepSetsBotTrim` vs `DeepSetsBlendBotTrim` | 51.3% | 46.4–56.1 | 58.0% | 44.5% |
+
+Neither is significant: the two submitted agents are not distinguishable head
+to head at 400 games. The paper cites the first row.
 
 **Before trusting any result, confirm the model actually loaded.** Both
 harnesses verify the ONNX hash in `GameRunner`'s output before running a single
@@ -691,6 +784,16 @@ DeepSets doing 12 % *less* work than the baseline. Note also that `9.0` is not
 *r*: evaluations per turn is only approximately linear in the time budget, a
 pilot at *r* = 7.08 undershot, and 9.0 was chosen empirically from that pilot.
 
+The baseline-slowed direction needed a pilot too. Its first scale, **0.2**, was
+predicted from `time_scaling` and overshot: over 40 games the baseline ran
+**10,544** evaluations per turn against DeepSets' **7,088**. The calibrated
+**0.141** (= 1/*r*) then matched within 3 %. The 40 pilot games and the 60
+calibration games are **not distributed** with this repository (see [Known
+limitations](#known-limitations)). Rerunning `--calibrate` writes its per-game
+files under `<out-dir>/calibration/matchup_NN_<label>/`; the authors' own copy
+of this pilot was filed by hand as `calibration/pilot_baseline_scale_0.2/`, which
+is a naming convention, not a path you will find here.
+
 Both directions ended with DeepSets doing slightly less work than the baseline
 (0.97× and 0.88×), so in both the residual mismatch runs **against** the DeepSets
 agent. That is the conservative direction for the claim: a win under these
@@ -699,7 +802,7 @@ conditions is not explained by the DeepSets side having been handed more search.
 The distortions differ in kind. Speeding the treatment up keeps the baseline at
 exactly the timing its author tuned it for, but hands `DeepSetsBotExp` an 88.2 s
 per-turn budget no tournament would give it, so the agent measured is not the
-agent submitted — and it costs roughly 9× the wall clock of any other row.
+agent submitted — and each of its games takes 2–6 minutes rather than one or two.
 Slowing the baseline down keeps `DeepSetsBotExp` at exactly its competing timing
 and costs no more than a normal row, but runs SakkirinaSolo's search at about a
 seventh of the budget it was designed around, where a hand-tuned heuristic may
@@ -732,55 +835,119 @@ dotnet build Bots/Bots.csproj       -c Release
 dotnet build GameRunner/GameRunner.csproj -c Release
 mkdir -p logs                                     # SLURM will NOT create this for you
 
-# scripts/slurm_experiment.sh defaults REPO_ROOT to this path. If you cloned
-# somewhere else, edit it there too, or every array task will look in the wrong
-# place.
+# scripts/slurm_experiment.sh and scripts/slurm_experiment_batched.sh each
+# hard-code REPO_ROOT to this path (the batched one calls the other). If you
+# cloned somewhere else, edit BOTH, or every task will look in the wrong place.
+# Submit from the repo root: the batched script's --output/--error are
+# relative (logs/expb_...).
 export OUT_DIR=$HOME/tot/experiment_results
 
 # --- 1. alpha sweep ---
 tools/benchmark_cluster.sh --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep" --dry-run
-sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep --array=0-1999%32 scripts/slurm_experiment.sh
+sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep,TOTAL_TASKS=2000 \
+    --array=0-49 --time=04:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py --config alpha_sweep --out-dir "$OUT_DIR/alpha_sweep"
 
 # --- 2. time scaling ---
 tools/benchmark_cluster.sh --config time_scaling --out-dir "$OUT_DIR/time_scaling" --dry-run
-# 0-1599 is the required 2/5/10/20 s rows; 1600-1999 is the optional 30 s row
-sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=0-1599%32 --time=00:20:00 scripts/slurm_experiment.sh
-sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=1600-1999%32 --time=00:30:00 scripts/slurm_experiment.sh
+# tasks 0-1599 are the 2/5/10/20 s rows; 1600-1999 is the 30 s row
+sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling,TOTAL_TASKS=2000 \
+    --array=0-48 --time=08:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py --config time_scaling --out-dir "$OUT_DIR/time_scaling"
 
 # --- 3. equal effort. Both configs are already calibrated and filled in;
 #        re-calibrate only if the hardware changed, since the ratio depends on it.
-tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
-    --out-dir "$OUT_DIR/equal_effort_baseline_slowed" --calibrate
+#        Calibrate on a COMPUTE node, as a single-core job: on the login node it
+#        would measure different hardware and hit the 20-minute CPU limit.
+#        The reported calibration is this command, at 60 games:
+sbatch --partition=c23ms --time=03:00:00 --ntasks=1 --cpus-per-task=1 --mem=2G \
+    --wrap="source $HOME/tot/env.sh && cd $HOME/tot/deepsets-tales-of-tribute && \
+            tools/benchmark_cluster.sh --config equal_effort_baseline_slowed \
+            --out-dir $OUT_DIR/equal_effort_baseline_slowed --calibrate \
+            --calibration-games 60 --skip-build"
 
 # --- 3a. baseline slowed down. Cheap, and the better-matched direction. ---
 #      SOT_BASELINE_TIME_SCALE=0.141 (= 1/r), timeout 12.
-sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort_baseline_slowed \
-    --array=0-399%32 --time=00:15:00 scripts/slurm_experiment.sh
+sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort_baseline_slowed,TOTAL_TASKS=400 \
+    --array=0-79 --time=00:45:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py --config equal_effort_baseline_slowed \
     --out-dir "$OUT_DIR/equal_effort_baseline_slowed"
 
-# --- 3b. treatment sped up. Expensive: ~120 core-hours for 400 games. ---
+# --- 3b. treatment sped up. ~25-30 core-hours for 400 games. ---
 #      SOT_TIME_SCALE=9.0, timeout 91 (= ceil(9.8 * 9.0) + 2).
-sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort \
-    --array=0-399%32 --time=00:45:00 scripts/slurm_experiment.sh
+sbatch --export=ALL,SOT_EXP_CONFIG=equal_effort,TOTAL_TASKS=400 \
+    --array=0-79 --time=04:00:00 scripts/slurm_experiment_batched.sh
 python tools/aggregate_benchmark_results.py --config equal_effort --out-dir "$OUT_DIR/equal_effort"
+
+# --- 4. seed benchmark ---
+sbatch --export=ALL,SOT_EXP_CONFIG=seed_benchmark,TOTAL_TASKS=2400 \
+    --array=0-79 --time=03:00:00 scripts/slurm_experiment_batched.sh
+python tools/aggregate_benchmark_results.py --config seed_benchmark --out-dir "$OUT_DIR/seed_benchmark"
+
+# --- 5. ablation benchmark ---
+sbatch --export=ALL,SOT_EXP_CONFIG=ablation_benchmark,TOTAL_TASKS=1600 \
+    --array=0-79 --time=01:00:00 scripts/slurm_experiment_batched.sh
+# a sub-range, e.g. one appended row (tasks 1200-1599 only):
+sbatch --export=ALL,SOT_EXP_CONFIG=ablation_benchmark,START_TASK=1200,TOTAL_TASKS=1600 \
+    --array=0-79 --time=01:00:00 scripts/slurm_experiment_batched.sh
+python tools/aggregate_benchmark_results.py --config ablation_benchmark --out-dir "$OUT_DIR/ablation_benchmark"
 ```
 
-**`--time` is not optional on 3b.** `slurm_experiment.sh` defaults to
-`00:30:00`, sized for the 30 s rows of `time_scaling`. At `SOT_TIME_SCALE=9.0`
-`DeepSetsBotExp` gets an 88.2 s per-turn budget, so a normal-length game takes
-roughly 9× the usual wall clock and every task would be killed at the 30-minute
-default with no result file. `00:45:00` leaves margin without over-requesting.
-Budget **~120 core-hours** for the 400 games; at `%32` that is about 4 hours of
-wall clock. The baseline-slowed direction costs a normal row's worth, which is
-why it is the one to lead with.
+These reproduce what was run. Steps 1–3 are the exact submissions; two
+experiments were split differently at the time:
 
-`--array` may exceed the site's `MaxArraySize`
-(`scontrol show config | grep -i MaxArraySize`); submit in chunks if so. Every
-task is resumable — one whose result file exists is skipped without running
-anything — so resubmitting a chunk, or the whole array, is always safe.
+- **Seed benchmark:** first all 2400 tasks (job 4457064, `--time=03:00:00`).
+  Its seed rows were invalid (unflushed exports, see section 3); its shipped
+  row, tasks 2000–2399, is the one reported. The seed rows were then rerun
+  alone with `TOTAL_TASKS=2000 --time=02:00:00` (job 4459158).
+- **Ablation benchmark:** first the three original arms
+  (`TOTAL_TASKS=1200 --time=01:30:00`), then the sorted arm on its own
+  (`START_TASK=1200,TOTAL_TASKS=1600 --time=01:00:00`), which is the sub-range
+  example above.
+
+`alpha_sweep` and `time_scaling` ran concurrently, as 50 + 49 = 99 submitted
+elements, just under the account limit below.
+
+**`--time` is per array element, and an element runs many games.** At
+`SOT_TIME_SCALE=9.0`, `DeepSetsBotExp` gets an 88.2 s per-turn budget and
+measured games took **2–6 minutes**; the 400 games cost **about 25–30
+core-hours**. (An earlier estimate here said ~120, extrapolated from the 9×
+budget; the measured figure replaces it.) The baseline-slowed direction costs a
+normal row's worth, which is why it is the one to lead with.
+
+### Job limits on a default RWTH account
+
+The default account has `MaxSubmitJobs=100` and `MaxJobs=80`, and every array
+element counts as a submitted job. A one-task-per-element array such as
+`--array=0-1999%32` is therefore rejected at submission with
+`AssocMaxSubmitJobLimit`; the `%32` throttle does not help, because it limits
+how many elements *run*, not how many are *submitted*. `MaxArraySize` (100000 on
+CLAIX) was never the issue.
+
+That is what `scripts/slurm_experiment_batched.sh` is for. Each array element
+`i` runs tasks `START_TASK + i`, `START_TASK + i + N`, … below `TOTAL_TASKS`,
+where `N` is the array size, so:
+
+- the array must be `0..N-1`, with `N` small enough that everything submitted at
+  once stays under 100;
+- `START_TASK` (default 0) and `TOTAL_TASKS` bound the task range, which is how a
+  single appended row is run on its own;
+- `--time` must cover all of an element's games in sequence.
+
+Every task is resumable — one whose result file exists is skipped without
+running anything — so resubmitting the whole array is always safe.
+
+**The wrapper does not fail on a failed task.** It logs the failure as `WARN`
+and moves on, so a job can finish "COMPLETED" with games missing. Afterwards:
+
+```bash
+grep -l WARN logs/expb_<jobid>_*.out     # any hit needs a look
+python tools/aggregate_benchmark_results.py --config <config> --out-dir <dir>
+# and check that every row reports 400/400
+```
+
+Small runs (smoke tests, fewer than 100 tasks) can use plain
+`scripts/slurm_experiment.sh` with `--array=<ids>`.
 
 ### Disqualifications and timeouts are reported separately
 
@@ -920,6 +1087,15 @@ python tools/evaluate_checkpoints.py models/deepsets_value_network.pth \
     "$HPCWORK"/tot_models/seed_0*/best_model.pth --data-dir "$SPLIT/val"
 ```
 
+`tools/evaluate_checkpoints.py` reports loss, accuracy, AUC and Brier per
+checkpoint, overall and by prestige-clock bucket, each against that slice's
+majority-class baseline — the same buckets `train_local.py` prints during
+training, so the numbers are directly comparable. It streams the dataset once
+and evaluates every checkpoint per batch, which is what guarantees they are all
+scored on byte-identical samples. The forward pass it uses is the *exported*
+one (plain per-node mean rather than `global_mean_pool`), i.e. the path the
+agent actually runs.
+
 **The ranking changed completely when the loader was fixed.** The val losses
 previously recorded here came from the resampled multiset the buggy DataLoader
 produced (see [Known limitations](#known-limitations)): 0.4385 / 0.4369 /
@@ -1050,10 +1226,24 @@ at all, where the other three each required choosing a scale, a budget or a
 matching criterion. See [Search volume: four experiments, one
 answer](#search-volume-four-experiments-one-answer).
 
-The first run's per-game files are archived at
-`experiment_results/calibration/seed_benchmark_unflushed_seeds/`, with a
-`README.txt` marking them invalid as win rates. They remain valid as the other
-arm of this comparison, which is the reason to keep them.
+The first run's per-game files are **not distributed** (see [Known
+limitations](#known-limitations)). The authors kept them, filed as
+`calibration/seed_benchmark_unflushed_seeds/` with a `README.txt` marking them
+invalid as win rates — they remain valid as the other arm of this comparison,
+which is the reason they were kept rather than deleted.
+
+Note what that means for reproducing this subsection specifically. Rerunning
+`seed_benchmark.json` as it stands reproduces only the *second* arm: the
+unflushed exports were superseded, and their hashes were deliberately removed
+from `allowed_onnx_sha256` so that they cannot be benchmarked by accident. The
+experiment is reproducible **in kind** rather than as these exact files — export
+each seed checkpoint twice, once with `training/export_to_onnx.py --no-flush` and
+once with the default flush, add both sets of hashes to a config, and run the two
+against the same 400 games. Since the flush changes speed and nothing else, that
+recreates the comparison. On x86-trained checkpoints the unflushed export is the
+slow one; trained on Apple Silicon there may be no subnormal weights to flush,
+and then no speed difference to measure (see [Denormal
+flushing](#denormal-flushing-and-why-the-export-is-platform-dependent)).
 
 ### Search volume: four experiments, one answer
 
@@ -1092,64 +1282,7 @@ volume does not matter" is not, and neither is any claim about the tournament
 field, where the same agents met seven other opponents on someone else's
 hardware. See [Which numbers come from where](#which-numbers-come-from-where).
 
-## 8. Held-out evaluation
-
-The benchmark measures agents. This measures *models*, on data none of them
-were trained on.
-
-```bash
-# 1. generate a held-out set from two DIFFERENT agents
-tools/generate_data.sh --games 2000 --out-dir "$HPCWORK/heldout" \
-    --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base 20260925
-
-# 2. score every checkpoint on it, in one pass, on identical samples
-python tools/evaluate_checkpoints.py \
-    models/deepsets_value_network.pth \
-    "$HPCWORK"/tot_models/seed_*/best_model.pth \
-    --data-dir "$HPCWORK/heldout"
-```
-
-Neither shipped model was trained on games between `DeepSetsBotExp` and
-`SakkirinaSolo`, so that pairing is genuinely unseen — which a fresh *self-play*
-set from the same generator would not be, however new its games are.
-`tools/generate_data.sh` alternates seats across jobs whenever the two bots
-differ: first-player advantage is real and correlates with the outcome label, so
-a set generated entirely with one agent in seat P1 would hand every metric a
-systematic bias.
-
-**That command sets no `SOT_ALPHA0`, so `DeepSetsBotExp` runs at its default
-`0.7` — the set is generated by the *blend* agent, not the network-only one.**
-That is a deliberate choice, not an oversight: the blend is the submitted
-1st-place agent, so its games are the states a deployed model actually has to
-evaluate. But it does mean the states are drawn from a policy that consults the
-heuristic early, and a model scored on them is being asked about that
-distribution specifically.
-
-To generate from the pure-network agent instead, export the variable before
-calling the script — `tools/generate_data.py` passes the ambient environment
-straight through to `GameRunner`, so it reaches the bot:
-
-```bash
-SOT_ALPHA0=0 tools/generate_data.sh --games 2000 --out-dir "$HPCWORK/heldout_a0" \
-    --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base 20260927
-```
-
-Note this is the one place in the pipeline where a `SOT_*` variable is read from
-the ambient shell. The benchmark harness deliberately strips them
-(`tools/benchmark_cluster.py`'s `build_env`) so a stray export cannot leak into
-a run that never asked for it; the generation path has no such guard, which
-makes it usable here and worth being careful about elsewhere.
-
-`tools/evaluate_checkpoints.py` reports loss, accuracy, AUC and Brier per
-checkpoint, overall and by prestige-clock bucket, each against that slice's
-majority-class baseline — the same buckets `train_local.py` prints during
-training, so the numbers are directly comparable. It streams the dataset once
-and evaluates every checkpoint per batch, which is what guarantees they are all
-scored on byte-identical samples. The forward pass it uses is the *exported*
-one (plain per-node mean rather than `global_mean_pool`), i.e. the path the
-agent actually runs.
-
-## 9. Flat-MLP ablation
+## 8. Flat-MLP ablation
 
 Does the DeepSets *structure* contribute, or do the 99-dim card features carry
 the result on their own? The ablation replaces the set encoder with a plain MLP
@@ -1245,7 +1378,7 @@ Validation loss by epoch, best in bold:
 | matched_sorted | 0.4614 | **0.4603** | 0.4632 |
 | wide | **0.5325** | 0.5562 | 0.5848 |
 
-All three then scored in one pass on the full validation split — 308,809
+All four arms were then scored in one pass on the full validation split — 308,809
 states, byte-identical samples, majority baseline 50.58%:
 
 | arm | parameters | loss | accuracy | AUC | Brier |
@@ -1255,23 +1388,38 @@ states, byte-identical samples, majority baseline 50.58%:
 | matched | 72,549 | 0.4635 | 76.73% | 0.8606 | 0.1533 |
 | wide | 1,649,409 | 0.5325 | 75.83% | 0.8520 | 0.1670 |
 
-**Sorting the rows helps offline, slightly.** `matched_sorted` beats `matched`
-on every metric — 0.4602 against 0.4635, 77.07% against 76.73% — which is what
-removing a nuisance variable from the input should do. It closes about a tenth
-of the distance to DeepSets.
+**Sorting the rows is better in aggregate, but not significantly.**
+`matched_sorted` is ahead of `matched` on every aggregate metric — 0.4602
+against 0.4635, 77.07% against 76.73% — but the game-clustered paired test over
+the 1,216 validation games does not resolve it: loss −0.0041 in sorted's favour,
+t 1.70, p 0.090 (Bonferroni-adjusted 0.54); accuracy +0.24 points, p 0.14
+(adjusted 0.86). That parallels the game result below, +6.0 points at p 0.09:
+**sorting improved neither the offline metrics nor the win rate detectably.**
+For contrast, `matched` against `wide` is clearly resolved: loss −0.0569,
+t −11.14; accuracy +1.10 points, adjusted p 3.4e-05.
 
-**DeepSets wins all sixteen cells**: best of the three on loss, accuracy, AUC
-and Brier, in every one of the four prestige-clock buckets, without exception.
+**DeepSets wins every comparison**: against all three flat arms, on loss,
+accuracy, AUC and Brier, in every one of the four prestige-clock buckets,
+without exception (four-arm scoring, job 4481557). Loss and accuracy:
 
-| bucket | n | loss (ds / matched / wide) | accuracy (ds / matched / wide) |
+| bucket | n | loss (ds / sorted / matched / wide) | accuracy (ds / sorted / matched / wide) |
 |---|---|---|---|
-| [0.00, 0.25) | 130,784 | 0.5643 / 0.5876 / 0.6453 | 69.63% / 67.65% / 66.68% |
-| [0.25, 0.50) | 64,605 | 0.4346 / 0.4761 / 0.5414 | 80.33% / 77.93% / 76.80% |
-| [0.50, 0.75) | 51,465 | 0.3313 / 0.3735 / 0.4633 | 85.08% / 83.74% / 83.12% |
-| [0.75, inf) | 61,955 | 0.2187 / 0.2629 / 0.3429 | 90.59% / 88.82% / 88.07% |
+| [0.00, 0.25) | 130,784 | 0.5643 / 0.5867 / 0.5876 / 0.6453 | 69.63% / 67.99% / 67.65% / 66.68% |
+| [0.25, 0.50) | 64,605 | 0.4346 / 0.4610 / 0.4761 / 0.5414 | 80.33% / 78.53% / 77.93% / 76.80% |
+| [0.50, 0.75) | 51,465 | 0.3313 / 0.3732 / 0.3735 / 0.4633 | 85.08% / 83.84% / 83.74% / 83.12% |
+| [0.75, inf) | 61,955 | 0.2187 / 0.2648 / 0.2629 / 0.3429 | 90.59% / 89.06% / 88.82% / 88.07% |
 
-Game-clustered paired tests over the 1,216 validation games, Bonferroni ×4 —
-**all four significant**, and not marginally:
+AUC and Brier against the closest arm, `matched_sorted`:
+
+| bucket | AUC (ds / sorted) | Brier (ds / sorted) |
+|---|---|---|
+| [0.00, 0.25) | 0.7745 / 0.7568 | 0.1931 / 0.2017 |
+| [0.25, 0.50) | 0.8826 / 0.8673 | 0.1389 / 0.1492 |
+| [0.50, 0.75) | 0.9336 / 0.9209 | 0.1044 / 0.1146 |
+| [0.75, inf) | 0.9707 / 0.9592 | 0.0678 / 0.0797 |
+
+Game-clustered paired tests over the 1,216 validation games, from the four-arm
+run, Bonferroni ×6 — **all six significant**, and not marginally:
 
 | comparison | metric | mean diff | SE | t(1215) | p | games better |
 |---|---|---|---|---|---|---|
@@ -1313,13 +1461,12 @@ right allocation and 16 GB is not.** The shuffle buffer dominates
 scales with that constant and the worker count rather than with the dataset.
 
 One operational note for anyone repeating the scoring step:
-`tools/evaluate_checkpoints.py` was **OOM-killed** on the first attempt at
-scoring all three arms over the full 308,809-state split, and had to be re-run
-with more memory. Measured locally, its resident set grows quickly and then
-plateaus at roughly 0.6 GB for three checkpoints — it does not grow linearly
-with the number of states — so this is an allocation to request explicitly, not
-a leak to work around. The per-state CSV writer streams and contributes
-nothing to it.
+`tools/evaluate_checkpoints.py` was **OOM-killed at a 16 GB limit** on the
+first attempt at scoring the arms over the full 308,809-state split. The rerun
+with a 64 GB limit completed at an **11.0 GB peak** (MaxRSS), in 14–27 minutes.
+The kill was most likely page cache from streaming the data and writing the
+per-state CSV, which the job's cgroup counts against its limit, rather than the
+process's own memory. **Request at least 32 GB.**
 
 #### The subset pilot
 
@@ -1507,7 +1654,8 @@ cannot see that. A flat MLP reads its input slot by slot, and does:
 The sorted arm is the control for this whole section: same architecture as
 `flat_matched`, same 72,549 parameters, and a reshuffle moves it by **exactly
 zero** because the canonical sort reconstructs the identical input vector.
-Verified on the shipped export with
+Verified on the sorted arm's exported ONNX (training job 4481407, scoring
+4481557, smoke test 4485290, benchmark run 4485349) with
 `tools/analyze_order_sensitivity.py invariance`, which reports sd 0 and
 max |diff| 0 for the sorted arm against **about 0.39–0.42** for `flat_matched`
 on the same states — 0.390 on the cluster over 60 states of the full validation
@@ -1638,6 +1786,34 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   [Which numbers come from where](#which-numbers-come-from-where).
 - **The shipped model's training metrics and wall-clock cost were not
   recorded.** Only the checkpoint and the exported ONNX survive from that run.
+- **Experiment artefacts are not distributed — only two models are.** `models/`
+  holds the submitted model (`deepsets_value_network.pth` and its export
+  `DeepSetsValueNetwork.onnx`) and the heuristic-only ablation checkpoint
+  (`ablation_heuristic_only.pth`, with its training metrics), each listed in
+  `models/SHA256SUMS`. Nothing else is. The five per-seed models, the four
+  flat-MLP ablation models, the per-game result files from every experiment in
+  [section 7](#7-paper-experiments) and [section 8](#8-flat-mlp-ablation), the
+  calibration and pilot games, and the per-state predictions behind the
+  clustered tests are **not** in this repository, and their absence is
+  deliberate rather than an omission.
+
+  Every reported number is given in this document, and each can be regenerated
+  with the scripts and configs here: `scripts/slurm_train.sh` for the models,
+  `experiments/configs/` and `tools/benchmark_cluster.sh` for the games,
+  `tools/aggregate_benchmark_results.py` for the win rates,
+  `tools/evaluate_checkpoints.py` for the offline scores, and
+  `tools/clustered_significance.py` for the game-clustered tests. Paths such as
+  `$HPCWORK/tot_models/` and `$HPCWORK/tot_ablation/` are where those scripts
+  write, not files that ship.
+
+  The SHA-256 hashes listed for the seed and ablation models identify the files
+  that were measured. A retrained model will have a different hash and should
+  behave comparably rather than identically, since training is not bit-exact
+  across hardware (see [section 3](#3-train)). One result is reproducible only
+  in kind: the accidental paired comparison in the seed benchmark, whose first
+  arm used exports that were later superseded — see [the invalid first
+  run](#the-invalid-first-run-is-an-accidental-paired-experiment) for how to
+  recreate it.
 - **The shipped model and the five seed models were each trained on a
   non-uniform subset of the shards, a different one every epoch.**
   `training/stream_dataset.py` shuffled the shard list with each worker's *own*
@@ -1690,7 +1866,7 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   308,809 states, byte-identical samples — with `tools/evaluate_checkpoints.py`,
   which streams single-process and is unaffected. The table is under [Seed
   benchmark results](#seed-benchmark-results). It had to run on the cluster: the
-  only local validation set belongs to [section 9](#9-flat-mlp-ablation)'s
+  only local validation set belongs to [section 8](#8-flat-mlp-ablation)'s
   subset, which was split separately from the full corpus, so its val games may
   appear in the shipped and seed models' *training* games.
 
@@ -1703,7 +1879,7 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   validation set is in its training data, and its 0.4585 on the common pass is
   reported for completeness only.
 
-  For how large the effect can be, see [section 9](#9-flat-mlp-ablation): the
+  For how large the effect can be, see [section 8](#8-flat-mlp-ablation): the
   ablation's **subset pilot** was first run at `--num-workers 4` and had to be
   discarded, because the three arms drew *different* shard multisets — the
   DataLoader seeds its workers from the main-process RNG after model
@@ -1715,8 +1891,8 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   **Both of those are 6% subset-pilot figures and neither is the result.** They
   are quoted here only to size the bug. The full-corpus run, on the same split
   every other model in this document uses, puts the DeepSets-versus-matched
-  loss gap at **0.0293** — see [Accuracy](#accuracy) in section 9. Do not
-  compare 0.054 against that, or against anything in the section 9 tables.
+  loss gap at **0.0293** — see [Accuracy](#accuracy) in section 8. Do not
+  compare 0.054 against that, or against anything in the section 8 tables.
 - **Byte-identical ONNX export requires PyTorch 2.2.2.** The model itself
   reproduces exactly on any version; only the file hash does not.
 - **Training data is not distributed** (several GB) and regenerates only
@@ -1754,5 +1930,15 @@ does its padding — and, for the sorted arm, its sorting — internally, so
   should be reported alongside the win rate. Calibrate at `SOT_ALPHA0=0`: above
   0, one counted evaluation runs *both* evaluators inside the blend window, so
   the counter measures the same event on both sides but not the same work.
+- **Data generation reads `SOT_*` variables from the ambient shell.**
+  `tools/generate_data.py` passes the environment straight through to
+  `GameRunner`, unlike the benchmark harness, which strips them
+  (`tools/benchmark_cluster.py`'s `build_env`). A stray `export SOT_ALPHA0=…`
+  therefore changes the agent that generates data. Unset them before generating.
+- **No evaluation on games from a different policy was run.** All offline
+  metrics in this document are on a held-out split of the self-play data that
+  the models were trained from. A planned evaluation on games between
+  `DeepSetsBotExp` and SakkirinaSolo was superseded by the common-split scoring
+  and never run.
 - **The engine is not byte-identical to the competition's.** Two tallying-only
   changes; see [above](#this-forks-engine-is-not-identical-to-the-competitions).
