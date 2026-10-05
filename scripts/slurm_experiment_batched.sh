@@ -5,9 +5,10 @@
 #SBATCH --mem=2G
 #SBATCH --output=logs/expb_%A_%a.out
 #SBATCH --error=logs/expb_%A_%a.err
-# Runs several experiment tasks in sequence per array task, by calling the
-# stock slurm_experiment.sh once per task id. Needed because the default
-# account allows only 100 submitted jobs. Array must be 0..N-1 (contiguous).
+# Runs several experiment tasks in sequence per array element, calling
+# slurm_experiment.sh once per task id, for accounts limited to 100 submitted
+# jobs. Task ids are START_TASK + element + k * (array size), so the array must
+# be 0..N-1.
 set -uo pipefail
 REPO_ROOT="$HOME/tot/deepsets-tales-of-tribute"
 START_TASK="${START_TASK:-0}"

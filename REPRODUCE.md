@@ -51,6 +51,52 @@ So, when citing:
 - Ablations and controls comparing our own variants against each other →
   local, but like-for-like, so the bias largely cancels.
 
+## The submitted build
+
+The competition entry was six flat files, placed into a checkout of the
+competition template:
+
+| Submitted file | Placed at |
+|---|---|
+| `DeepSetsBot.cs` | `Bots/src/DeepSetsBot.cs` |
+| `DeepSetsBlendBot.cs` | `Bots/src/DeepSetsBlendBot.cs` |
+| `DeepSetsCore.cs` | `Bots/src/DeepSetsCore.cs` |
+| `DeepSetsValueNetwork.onnx` | `Bots/DeepSetsValueNetwork.onnx` |
+| `Bots.csproj` | `Bots/Bots.csproj`, replacing the template's |
+| `SUBMISSION.md` | not part of the build |
+
+The submitted `Bots.csproj` added two items to the template's: a package
+reference to `Microsoft.ML.OnnxRuntime` 1.26.0 (CPU inference only), and
+`<None Update="DeepSetsValueNetwork.onnx">` with `PreserveNewest`, for the model
+at `Bots/DeepSetsValueNetwork.onnx`. This repository keeps the model in
+`models/` and includes it with `<None Include="..\models\DeepSetsValueNetwork.onnx">`
+plus a `<Link>`. The bot sources and the model are the same files that were
+submitted.
+
+The model file is 294,979 bytes, SHA-256
+`86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915`. Peak
+resident memory for a full `GameRunner` process (both bots and the engine, one
+game) was about 162 MB, measured with `/usr/bin/time -l`, against the
+competition's 256 MB limit.
+
+Submission-era local results. These are matchups 4, 2 and 6 of
+[`legacy_paper_benchmark.json`](experiments/configs/legacy_paper_benchmark.json),
+from its August 2026 cluster run (CLAIX, partition c23ms): 400 games per
+matchup, 10 s per turn, the competition's six-patron set (ANSEI, DUKE_OF_CROWS,
+RAJHIN, ORGNUM, PELIN, SAINT_ALESSIA), seats swapped between halves, 95% Wilson
+intervals. Each row is 400/400 clean games with no draws; all 4800 games of the
+12 legacy matchups completed clean.
+
+| Matchup | Bot | Opponent | Wins–losses | Win rate | 95% CI |
+|---|---|---|---|---|---|
+| 4 | `DeepSetsBot` | MCTSBot | 354–46 | 88.5% | [85.0, 91.3] |
+| 2 | `DeepSetsBlendBot` | SakkirinaSolo | 308–92 | 77.0% | [72.6, 80.9] |
+| 6 | `DeepSetsBlendBot` | MCTSBot | 353–47 | 88.3% | [84.7, 91.0] |
+
+The fourth submission-era row, `DeepSetsBot` vs
+SakkirinaSolo at 76.3%, is in the table above. Like every local figure here,
+these are estimates expected to run optimistic.
+
 ## This fork's engine is not identical to the competition's
 
 Two changes were made outside our own code so that the experiment harness could
@@ -760,7 +806,7 @@ default `0.7` makes it behave as `DeepSetsBlendBot`, so one class covers both.
 | `time_scaling` | Does the advantage hold as the per-turn budget moves 2 s → 30 s? | 2000 |
 | `equal_effort` | Is the network better, or is the baseline just searching more? Treatment sped up. | 400 |
 | `equal_effort_baseline_slowed` | The same question, baseline slowed down instead. | 400 |
-| `seed_benchmark` | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. | 2400 |
+| `seed_benchmark` | How much of the win rate is the training seed? Five per-seed models plus the shipped one, 400 games each on one seed_base. | 2400 |
 | `ablation_benchmark` | Does the DeepSets structure win *games*, or only validation loss? A control and three flat-MLP arms, including a permutation-invariant one. | 1600 |
 
 ### Equal effort is run in both directions
@@ -1175,11 +1221,12 @@ believed about its model.
 
 This is the most informative thing in the section, and nobody designed it.
 
-The first run measured the same five models on the same 400 games each, with one
-difference: the unflushed models searched roughly **4.5× less** (about 1,400
-evaluations per turn against about 6,150 now). The models themselves were
-identical — `tools/compare_onnx_models.py` found zero output difference across
-2000 real states per seed, so flushing changed the speed and nothing else.
+The first run measured the same five models on the same 400 deals each (same
+task ids, same seeds), with one difference: the unflushed models searched
+roughly **4.5× less** (about 1,400 evaluations per turn against about 6,150
+now). The models themselves were identical — `tools/compare_onnx_models.py`
+found zero output difference across 2000 real states per seed, so flushing
+changed the speed and nothing else.
 
 | | evals/turn | seed win rates | mean |
 |---|---|---|---|
@@ -1187,9 +1234,9 @@ identical — `tools/compare_onnx_models.py` found zero output difference across
 | Rerun (flushed) | ~6,150 | 75.0 / 75.0 / 78.0 / 76.0 / 69.25 | **74.65%** |
 
 A 1.25-point difference from quartering the search volume. Because the two runs
-played **the same games**, this can be tested pair by pair rather than as two
-aggregates, which is the stronger analysis — McNemar over the games whose outcome
-changed.
+were dealt **the same deals, task for task**, this can be tested pair by pair
+rather than as two aggregates, which is the stronger analysis — McNemar over the
+games whose outcome changed.
 
 The pairing was verified rather than assumed: both runs have the same task ids,
 the same task → seed map, the same seat assignments, and no draws or non-clean
@@ -1220,7 +1267,7 @@ at 66.2%, most discordant pairs at 135.)
 
 **This is the cleanest of the four search-volume results**, because nothing was
 deliberately varied. Identical models — `compare_onnx_models.py` verified zero
-output difference — identical games, identical everything except a confound that
+output difference — identical deals, identical everything except a confound that
 was accidental and complete. There was no experimenter degree of freedom in it
 at all, where the other three each required choosing a scale, a budget or a
 matching criterion. See [Search volume: four experiments, one
@@ -1237,12 +1284,15 @@ Note what that means for reproducing this subsection specifically. Rerunning
 unflushed exports were superseded, and their hashes were deliberately removed
 from `allowed_onnx_sha256` so that they cannot be benchmarked by accident. The
 experiment is reproducible **in kind** rather than as these exact files — export
-each seed checkpoint twice, once with `training/export_to_onnx.py --no-flush` and
-once with the default flush, add both sets of hashes to a config, and run the two
-against the same 400 games. Since the flush changes speed and nothing else, that
-recreates the comparison. On x86-trained checkpoints the unflushed export is the
-slow one; trained on Apple Silicon there may be no subnormal weights to flush,
-and then no speed difference to measure (see [Denormal
+each seed checkpoint twice, once with `training/export_to_onnx.py --no-flush`
+and once with the default flush, then run the same config twice into two
+separate output directories: once with the unflushed exports' paths and hashes,
+once with the flushed ones. The two runs share task ids, so each task gets the
+same deal in both. Since the flush changes speed and nothing else, that
+recreates the comparison.
+On x86-trained checkpoints the unflushed export is the slow one; trained on
+Apple Silicon there may be no subnormal weights to flush, and then no speed
+difference to measure (see [Denormal
 flushing](#denormal-flushing-and-why-the-export-is-platform-dependent)).
 
 ### Search volume: four experiments, one answer
@@ -1268,7 +1318,7 @@ makes the agreement worth something:
 - The two `equal_effort` directions each move **one** side, and each distorts
   the agent it moves — one gets a budget no tournament would give it, the other
   runs at a seventh of what it was tuned for.
-- The **accidental pair is the cleanest**: identical models, identical games,
+- The **accidental pair is the cleanest**: identical models, identical deals,
   nothing deliberately varied, no experimenter degree of freedom, and the only
   one testable pair-by-pair rather than as two aggregates.
 

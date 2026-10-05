@@ -1,40 +1,20 @@
 """
-Does node ORDER matter to a value network, and does the agent's search change it?
+Measure how node order affects a value network, and whether the agent's search
+changes it.
 
-WHY THIS EXISTS. The flat-MLP ablation (REPRODUCE.md section 9) lost by 1.9
-accuracy points offline and by 31 win-rate points in games. That gap needed
-explaining, and the explanation is here: the agent searches over DETERMINISED
-states, in which the hidden piles are reshuffled, and a flat MLP reads its
-input slot by slot. DeepSets is permutation-invariant and cannot notice; a flat
-model can, and does.
+The agent evaluates determinised states, in which the hidden piles are
+reshuffled. DeepSets is permutation-invariant; a flat MLP reads its input slot
+by slot and is not. Four analyses, on real logged states:
 
-Four analyses, all on real logged states:
-
-  sensitivity  How far does reshuffling the hidden piles move each model's
-               output? Reported against two scales: the spread across unrelated
-               states, and -- the one that matters for play -- the change
-               between two states one move apart, which is what a search has to
-               resolve.
-
-  accuracy     Offline accuracy on the logged order, on a uniform reshuffle,
-               and on a reshuffle that preserves duplicate clustering. The
-               first tells you how optimistic the reported offline figures are;
-               the third tests whether the clustering regularity in the logged
-               data is what the model was using.
-
-  invariance   Does a given .onnx carry the canonical row sort? Reports the
-               reshuffle sd per exported graph and fails if one that should be
-               permutation-invariant is not -- the check for a matched_sorted
-               checkpoint exported with the wrong --arch, which passes its own
-               export verification and is otherwise silent.
-
-  leak         Does the logged pile order reflect the TRUE upcoming draw order
-               -- information no player has? If it did, the flat models'
-               offline numbers would be inflated by a leak rather than by
-               distribution fit, and the reshuffle penalty would be the
-               removal of that leak.
-
-Read-only. Usage:
+  sensitivity  How far reshuffling the hidden piles moves each model's output,
+               against the spread across states and against the change between
+               two states one move apart.
+  accuracy     Offline accuracy on the logged order, on a uniform reshuffle, and
+               on a reshuffle that keeps duplicate cards adjacent.
+  invariance   Whether an exported .onnx is permutation-invariant. Catches a
+               matched_sorted checkpoint exported with the wrong --arch, which
+               passes the export's own verification.
+  leak         Whether the logged pile order reflects the true draw order.
 
     python tools/analyze_order_sensitivity.py all --data-dir "$SPLIT/val" \\
         --onnx deepsets=.../DeepSetsValueNetwork_seed_00.onnx \\
@@ -47,7 +27,8 @@ Read-only. Usage:
         --onnx matched_sorted=.../FlatValueNetwork_matched_sorted_seed_00.onnx \\
         --expect-invariant deepsets --expect-invariant matched_sorted
 
-`leak` needs no models. Every analysis is seeded, so reruns agree.
+`leak` needs no models. Every analysis is seeded. Results are in REPRODUCE.md
+section 8.
 """
 import argparse
 import glob
@@ -73,9 +54,9 @@ except ImportError as e:  # pragma: no cover - environment problem, not logic
 HIDDEN_LOCS = (4, 8)
 LOC_BASE = 90        # location one-hot occupies node-feature indices 90..98
 
-# Below this, a model counts as permutation-invariant. See run_invariance:
-# bit-exact for a sorted flat export, ~1e-6 for DeepSets (float32 reassociation
-# in the mean-pool), ~0.4 for an unsorted flat model. Nothing lands between.
+# Below this max |diff| a model counts as invariant. A sorted export gives
+# exactly 0, DeepSets ~1e-6 from float32 reassociation in the mean-pool, and an
+# unsorted flat model ~0.4.
 INVARIANCE_TOL = 1e-4
 
 
@@ -97,13 +78,11 @@ def infer(sess, x, u):
 
 
 def reorder(x, locs, rng, mode):
-    """Re-order rows WITHIN the hidden piles only.
+    """Re-order rows within the hidden piles only.
 
-    uniform  -- a uniformly random permutation, which is what a determiniser
-                produces.
-    grouped  -- a random permutation that keeps identical cards adjacent, so it
-                preserves the duplicate clustering the logged order has while
-                changing everything else about the arrangement.
+    uniform  -- a uniformly random permutation, as a determiniser produces.
+    grouped  -- a random permutation that keeps identical cards adjacent,
+                preserving the logged order's duplicate clustering.
     """
     out = x.copy()
     for b in HIDDEN_LOCS:
@@ -306,28 +285,15 @@ def run_leak(data_dir, limit):
 
 
 def run_invariance(models, data_dir, n_states, k, seed, expect_invariant):
-    """Does the EXPORTED GRAPH carry the canonical sort?
+    """Check that each exported graph is, or is not, permutation-invariant.
 
-    The sort lives inside the model, so whether an .onnx has it is a property
-    of the file, not of the checkpoint it came from -- and exporting a
-    matched_sorted checkpoint with the wrong --arch produces a graph that is
-    missing it, passes its own export verification (the reference is built
-    from the same wrong arch), and plays differently. This is the check that
-    catches that, and it needs nothing but the .onnx.
+    The sort lives in the graph, so a matched_sorted checkpoint exported with the
+    wrong --arch loses it and still passes the export's own verification.
 
-    INVARIANCE IS JUDGED TO A TOLERANCE, and the reason is worth knowing.
-    A *_sorted flat export is invariant BIT-EXACTLY: the sort produces the
-    identical input vector, so the identical arithmetic runs. DeepSets is not,
-    quite -- it is invariant mathematically, but permuting the rows changes the
-    order in which the mean-pool sums them, and float32 addition is not
-    associative. Measured, that costs about 1e-6 in the logit.
-
-    So the verdict is "invariant" below INVARIANCE_TOL and "sensitive" above
-    it. The two populations are not close: reassociation noise lands at ~1e-6
-    and real order sensitivity at ~0.4, five to six orders apart, so no
-    threshold in between is delicate. The printed numbers show which case a
-    model is in, and a model NOT listed whose diff is ~0 fails too, because
-    that means the reshuffle did nothing and the test proved nothing.
+    Judged to INVARIANCE_TOL rather than to exactly 0: a sorted export is
+    bit-exact, but DeepSets differs by ~1e-6, because permuting rows changes the
+    mean-pool's summation order. A model not listed in expect_invariant must
+    change, or the reshuffle tested nothing.
     """
     states = load_states(data_dir, 53, n_states)
     print(f"  {len(states)} real states x {k} reshuffles of the hidden piles\n")

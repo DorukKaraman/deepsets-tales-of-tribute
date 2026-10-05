@@ -1,49 +1,38 @@
 #!/usr/bin/env bash
-# SLURM array template: train one value network PER SEED from one shared
-# dataset, export each to ONNX, and leave every artefact under its own
-# per-seed directory in $HPCWORK.
+# SLURM array template: train one value network per seed from one shared
+# dataset, export each to ONNX, and keep every artefact in its own per-seed
+# directory under $HPCWORK.
 #
-# WHY SEEDS: a single trained model's win rate is one sample from a
-# distribution, and reporting it as if it were the distribution is the most
-# common way a result like this fails to replicate. Training N models that
-# differ ONLY in seed -- same data, same split, same hyperparameters -- and
-# benchmarking each gives the spread that belongs in the paper alongside the
-# mean. training/train_local.py --seed seeds torch, numpy, python random and
-# the shuffle buffer, so two tasks here differ in weight initialisation and
-# data order and in nothing else.
+# One model's win rate is a single sample, so the paper reports the spread over
+# models that differ only in seed. training/train_local.py --seed seeds torch,
+# numpy, Python's random and the shuffle buffer, so tasks differ only in weight
+# initialisation and data order.
 #
-# ONE TASK = ONE SEED = ONE MODEL. Tasks share the dataset read-only and write
-# to disjoint directories, so there is no coordination between them and a
-# failed seed is re-run by resubmitting just that array index.
+# One task = one seed = one model. Tasks read the dataset and write to disjoint
+# directories; a failed seed is rerun by resubmitting its array index.
 #
-# NOTHING GOES TO /tmp. Cluster /tmp is node-local, small, and wiped when the
-# job ends -- a checkpoint written there is gone before you can fetch it, and a
-# multi-GB dataset staged there can fill the node for everyone else. This
-# script refuses to run if $HPCWORK is unset rather than silently falling back,
-# and it points TMPDIR at $HPCWORK too so that pip, torch and matplotlib's
-# scratch files land somewhere with a real quota.
+# Nothing goes to /tmp, which on the cluster is node-local, small and wiped when
+# the job ends. The script refuses to run without $HPCWORK and points TMPDIR
+# there too.
 #
-# CPU COUNT: unlike the benchmark arrays (1 core/task, because one game is
-# single-threaded by construction), training is a BLAS workload and 1 core
-# would be pointlessly slow. This asks for CPUS_PER_TASK cores and tells torch
-# to use exactly that many -- not more, which on a shared node means fighting
-# other jobs for cores the scheduler never gave you. Adjust to your allocation.
+# Training is a BLAS workload, so it asks for CPUS_PER_TASK cores (unlike the
+# 1-core benchmark arrays) and tells torch to use exactly that many. Adjust to
+# your allocation.
 #
-# SETUP (do this BEFORE sbatch-ing, not after):
+# Setup, before sbatch:
 #   1. Build the Python environment once, on the login node:
 #        ./scripts/setup_python_env.sh --venv-dir "$HPCWORK/tot_venv"
-#      It pins torch 2.2.2, which is the version that reproduces the shipped
-#      ONNX byte hash -- see that script's header.
-#   2. Have a split dataset ready (tools/split_dataset.py output, i.e. a
-#      directory containing train/ and val/). Set DATA_DIR below.
+#      It pins torch 2.2.2, the version that reproduces the shipped ONNX byte
+#      hash; see that script's header.
+#   2. Have a split dataset ready (tools/split_dataset.py output, a directory
+#      containing train/ and val/). Set DATA_DIR below.
 #   3. mkdir -p CHANGE_ME_REPO_ROOT/logs
-#      SLURM does NOT create the directory for #SBATCH --output/--error.
-#   4. Replace every CHANGE_ME_* placeholder below. The guard further down
+#      SLURM does not create the directory for #SBATCH --output/--error.
+#   4. Replace every CHANGE_ME_* placeholder below; the guard further down
 #      refuses to run if any are left.
 #   5. sbatch scripts/slurm_train.sh
 #
-# WHICH NETWORK, AND WHERE IT LANDS. Two environment variables, both with
-# today's behaviour as their default, so an unchanged submission is unchanged:
+# Network and output location are set by two environment variables:
 #
 #   ARCH=deepsets       (default) train_local.py + export_to_onnx.py
 #   ARCH=matched                  train_flat.py --arch matched        + export_flat_to_onnx.py
@@ -51,25 +40,24 @@
 #   ARCH=matched_sorted           train_flat.py --arch matched_sorted + export_flat_to_onnx.py
 #   OUT_ROOT=...        (default $HPCWORK/tot_models)
 #
-# matched and wide are the flat-MLP ablation (REPRODUCE.md section 9). Give
-# them their own OUT_ROOT -- the default directory holds the paper's per-seed
-# models, and the output path depends only on the array index, so an ablation
-# run at --seed 0 would otherwise land on top of seed_00:
+# The flat arms are the flat-MLP ablation (REPRODUCE.md section 8). Give them
+# their own OUT_ROOT: the output path depends only on the array index, so an
+# ablation run at --seed 0 would otherwise land on the paper's seed_00:
 #
 #   ARCH=matched        OUT_ROOT="$HPCWORK/tot_ablation/matched"        sbatch scripts/slurm_train.sh
 #   ARCH=wide           OUT_ROOT="$HPCWORK/tot_ablation/wide"           sbatch scripts/slurm_train.sh
 #   ARCH=matched_sorted OUT_ROOT="$HPCWORK/tot_ablation/matched_sorted" sbatch scripts/slurm_train.sh
 #
-# matched_sorted is matched with the node rows put into a canonical order
-# before flattening -- same widths, same 72,549 parameters. It exists because
-# the unsorted flat models are not permutation-invariant and the agent's search
-# reshuffles hidden piles on every determinisation, so the unsorted arms'
-# game results conflate evaluator quality with the lack of invariance.
+# matched_sorted is matched with the node rows put in a canonical order before
+# flattening (same widths, same 72,549 parameters). The unsorted flat models are
+# not permutation-invariant while the search reshuffles hidden piles on every
+# determinisation, so their game results mix evaluator quality with the lack of
+# invariance.
 #
-# The script refuses to start if the target seed directory already holds a
-# best_model.pth. FORCE=1 overrides that; nothing else does.
+# The script refuses to start if the seed directory already holds a
+# best_model.pth, unless FORCE=1.
 #
-# AFTERWARDS, each seed leaves (paths shown for the default OUT_ROOT):
+# Each seed leaves (paths for the default OUT_ROOT):
 #   $HPCWORK/tot_models/seed_NN/best_model.pth
 #   $HPCWORK/tot_models/seed_NN/deepsets_value_network_epochK.pth
 #     (flat arms: flat_matched_value_network_epochK.pth / flat_wide_...)
@@ -80,20 +68,19 @@
 #     (flat arms: FlatValueNetwork_<arch>_seed_NN.onnx)
 #   $HPCWORK/tot_models/seed_NN/SHA256SUMS
 #
-# Then, to use a seed's model in an experiment: add its ONNX sha256 to the
-# config's allowed_onnx_sha256 and point the matchup at it with
-# SOT_MODEL_PATH -- tools/benchmark_cluster.py verifies both before it will run
-# a single game. To compare the seeds as MODELS rather than as agents, score
-# them all on one held-out set with tools/evaluate_checkpoints.py.
+# To use a seed's model in an experiment, add its ONNX sha256 to the config's
+# allowed_onnx_sha256 and point the matchup at it with SOT_MODEL_PATH;
+# tools/benchmark_cluster.py checks both before running a game. To compare seeds
+# as models rather than agents, score them on one held-out set with
+# tools/evaluate_checkpoints.py.
 
 #SBATCH --job-name=deepsets_train
 #SBATCH --partition=CHANGE_ME_PARTITION
 #SBATCH --array=0-4
 #SBATCH --cpus-per-task=8
 # 24G: the shuffle buffer (training/stream_dataset.py,
-# DEFAULT_SHUFFLE_BUFFER_SIZE = 100,000 parsed graphs) dominates memory here, so
-# this scales with that constant rather than with the dataset size. A 16 GB run
-# pressed against its ceiling.
+# DEFAULT_SHUFFLE_BUFFER_SIZE = 100,000 parsed graphs) dominates memory, so this
+# scales with that constant, not with dataset size. 16G ran at its ceiling.
 #SBATCH --mem=24G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/train_%A_%a.out
@@ -107,24 +94,22 @@ DATA_DIR="CHANGE_ME_SPLIT_DATA_DIR"    # tools/split_dataset.py output: contains
 
 # --- Have real defaults; edit if you want different ones ---
 VENV_DIR="${SOT_VENV_DIR:-$HPCWORK/tot_venv}"
-# ARCH selects which network this array trains. The default reproduces what
-# this script has always done, so an unchanged submission behaves unchanged.
+# ARCH selects the network this array trains (default deepsets):
 #   deepsets  training/train_local.py    + training/export_to_onnx.py
 #   matched   training/train_flat.py     + training/export_flat_to_onnx.py  (72,549 params)
 #   wide      training/train_flat.py     + training/export_flat_to_onnx.py  (1,649,409 params)
-# matched/wide are the flat-MLP ablation -- see REPRODUCE.md section 9.
+# matched/wide are the flat-MLP ablation; see REPRODUCE.md section 8.
 ARCH="${ARCH:-deepsets}"
-# OUT_ROOT is overridable so the ablation does not write into the directory
-# holding the paper's per-seed models. Send it somewhere of its own:
+# OUT_ROOT keeps the ablation out of the directory holding the paper's per-seed
+# models:
 #   ARCH=matched OUT_ROOT="$HPCWORK/tot_ablation/matched" sbatch scripts/slurm_train.sh
 OUT_ROOT="${OUT_ROOT:-$HPCWORK/tot_models}"
 EPOCHS=3            # what the shipped model used
 BATCH_SIZE=256      # what the shipped model used
 LR=5e-4             # what the shipped model used
 CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-8}"
-# DataLoader workers. One fewer than the allocation, so the main process (which
-# does the actual optimizer step) is not competing with its own workers for the
-# last core.
+# DataLoader workers: one fewer than the allocation, leaving a core for the main
+# process, which runs the optimizer step.
 NUM_WORKERS=$((CPUS_PER_TASK > 1 ? CPUS_PER_TASK - 1 : 0))
 # -------------------------------------------------------------
 
@@ -137,8 +122,8 @@ for name in REPO_ROOT DATA_DIR; do
   fi
 done
 
-# $HPCWORK is the only place outputs may go. No fallback on purpose: a fallback
-# is how training artefacts end up on node-local scratch and disappear.
+# Outputs go only to $HPCWORK. There is no fallback, since a fallback is how
+# artefacts end up on node-local scratch and disappear.
 if [ -z "${HPCWORK:-}" ]; then
   echo "ERROR: \$HPCWORK is not set." >&2
   echo "       Every output of this script goes under \$HPCWORK. There is deliberately no" >&2
@@ -160,20 +145,11 @@ SEED="$SLURM_ARRAY_TASK_ID"
 SEED_TAG="$(printf 'seed_%02d' "$SEED")"
 OUT_DIR="$OUT_ROOT/$SEED_TAG"
 
-# REFUSE TO OVERWRITE AN EXISTING TRAINED MODEL.
-#
-# The output path is derived from the array index alone, so two runs with the
-# same index write to the same directory -- and the per-seed models behind the
-# paper's seed benchmark live at $HPCWORK/tot_models/seed_00..04. A rerun at
-# --seed 0, for any reason, silently replaced seed_00's best_model.pth with a
-# different network; nothing warned, and the .onnx beside it would still carry
-# the OLD hash until the export step overwrote that too. The result is a
-# directory whose contents no longer match the hashes in
-# experiments/configs/seed_benchmark.json, discoverable only by re-running
-# sha256sum.
-#
-# This risk predates the ablation and is not specific to it. FORCE=1 is the
-# deliberate override; there is no automatic one.
+# Refuse to overwrite an existing trained model. The output path depends only on
+# the array index, and the paper's per-seed models live at
+# $HPCWORK/tot_models/seed_00..04. A rerun at the same index would replace
+# best_model.pth without warning, and the directory would no longer match the
+# hashes in experiments/configs/seed_benchmark.json. FORCE=1 overrides.
 if [ -f "$OUT_DIR/best_model.pth" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "ERROR: $OUT_DIR/best_model.pth already exists." >&2
   echo "       This directory holds a trained model. Overwriting it would replace a" >&2
@@ -189,16 +165,15 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-# Keep every scratch file off /tmp too -- pip, torch extensions and matplotlib
-# all write there by default, and on a shared node that is somebody else's
-# problem as much as yours.
+# Keep scratch files off /tmp too; pip, torch extensions and matplotlib write
+# there by default.
 export TMPDIR="$HPCWORK/tmp/$SLURM_JOB_ID"
 mkdir -p "$TMPDIR"
 export MPLCONFIGDIR="$TMPDIR/mpl"
 
-# Match the thread count to the allocation. Left unset, OpenMP sizes itself
-# from the machine's total core count, not the cgroup's -- so an 8-core
-# allocation on a 96-core node spawns 96 threads that then thrash.
+# Match the thread count to the allocation. Unset, OpenMP sizes itself from the
+# machine's core count, not the cgroup's, so an 8-core allocation on a 96-core
+# node spawns 96 threads.
 export OMP_NUM_THREADS="$CPUS_PER_TASK"
 export MKL_NUM_THREADS="$CPUS_PER_TASK"
 
@@ -258,11 +233,9 @@ fi
 
 echo
 echo "=== Exporting to ONNX ==="
-# Both exporters verify the exported graph against the PyTorch model across a
-# range of node counts, under a combined atol+rtol tolerance, and write to a
-# temp file that is only renamed into place once it passes -- so a silent
-# export bug cannot reach the benchmark, and a failed export cannot leave an
-# unverified .onnx behind.
+# Both exporters verify the graph against the PyTorch model across a range of
+# node counts (atol+rtol) and write to a temp file renamed into place only once
+# it passes, so a failed export leaves no unverified .onnx behind.
 if [ "$ARCH" = "deepsets" ]; then
   ONNX_OUT="$OUT_DIR/DeepSetsValueNetwork_${SEED_TAG}.onnx"
   ( cd "$REPO_ROOT/training" && python export_to_onnx.py --checkpoint "$BEST_MODEL" --out "$ONNX_OUT" )

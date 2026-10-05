@@ -11,12 +11,12 @@ namespace Bots;
 
 
 // DeepSetsBlendBotTrim: the same DeepSets-evaluated search as DeepSetsBot, with
-// one addition -- Evaluate() blends the hand-written heuristic and the
+// one addition: Evaluate() blends the hand-written heuristic and the
 // neural evaluator by game phase, instead of using the network alone.
 //
-// Motivation: the network's validation accuracy (AUC) is weakest early --
-// 0.797 in the [0.00, 0.25) prestige-clock bucket versus 0.971 in
-// [0.75, inf) -- while the heuristic encodes hand-tuned early-game economy
+// Motivation: the network's validation accuracy (AUC) is weakest early
+// (0.797 in the [0.00, 0.25) prestige-clock bucket versus 0.971 in
+// [0.75, inf)), while the heuristic encodes hand-tuned early-game economy
 // knowledge. The blend leans on the heuristic early and fades to the network
 // alone as the game progresses; see ALPHA_START / ALPHA_FULL_BELOW /
 // ALPHA_ZERO_ABOVE below for exactly how.
@@ -30,7 +30,7 @@ public class DeepSetsBlendBotTrim : AI
     // alpha = ALPHA_START while the root prestige clock (see Play() below) is
     // at or below ALPHA_FULL_BELOW, decays linearly to 0.0 by the time the
     // clock reaches ALPHA_ZERO_ABOVE, and stays 0.0 (pure neural) beyond that.
-    // Tune freely -- these are the only three numbers that matter here.
+    // Tune freely; these are the only three numbers that matter here.
     const double ALPHA_START = 0.7;
     const double ALPHA_FULL_BELOW = 0.10;
     const double ALPHA_ZERO_ABOVE = 0.50;
@@ -235,16 +235,15 @@ public class DeepSetsBlendBotTrim : AI
 
     // Frozen once per Play() call (see Play() below), from that call's root
     // state, and held fixed for every leaf evaluation performed by the search
-    // launched from that call -- deliberately NOT recomputed per leaf.
+    // launched from that call, deliberately not recomputed per leaf.
     // Prestige can change within our own turn, so a per-leaf alpha would mean
     // the evaluator judging a move changes because of the very prestige swing
     // that move causes, which would confound the move's value with which
     // evaluator graded it.
     double _currentAlpha = ALPHA_START;
 
-    // ONNX evaluator + perspective-flip bookkeeping for Evaluate() above,
-    // mirroring ISMCTSBot's ValueNetworkEvaluator usage and END_TURN flip
-    // tracking.
+    // ONNX evaluator, plus bookkeeping for the perspective flip in Evaluate()
+    // below.
     private ValueNetworkEvaluator? _evaluator;
     private long _evalFlippedCount = 0;
     private long _evalNotFlippedCount = 0;
@@ -257,13 +256,8 @@ public class DeepSetsBlendBotTrim : AI
     // the opening position.
     private int _perspectiveCheckLogsRemaining = 2;
 
-    // Throughput telemetry: an unambiguous, directly-counted alternative to
-    // inferring iteration counts from the private search tree's visit counts
-    // (which broke because ProceedTree re-roots the tree at the end of every
-    // Play() call, so a before/after snapshot of rootNode.visits can end up
-    // reading two different nodes' counters). _evalNetworkStopwatch times ONLY
-    // the EvaluateBoardState call itself, to see what fraction of wall clock
-    // the ONNX inference actually accounts for.
+    // Throughput telemetry: _totalEvalCalls counts every Evaluate() call, and
+    // _evalNetworkStopwatch times only the neural evaluator within it.
     private long _totalEvalCalls = 0;
     private readonly System.Diagnostics.Stopwatch _evalNetworkStopwatch = new System.Diagnostics.Stopwatch();
     private readonly System.Diagnostics.Stopwatch _gameWallClock = new System.Diagnostics.Stopwatch();
@@ -325,7 +319,7 @@ public class DeepSetsBlendBotTrim : AI
     }
 
     // Original hand-written heuristic, kept so the two evaluators can be A/B'd
-    // inside the identical search later. No longer called by Simulate() -- see
+    // inside the identical search later. No longer called by Simulate(); see
     // Evaluate() below, which replaces it as the active evaluator.
     static double EvaluateHeuristic(SeededGameState gameState, PlayerEnum playerID)
     {
@@ -412,12 +406,12 @@ public class DeepSetsBlendBotTrim : AI
         return ALPHA_START * (1.0 - t);
     }
 
-    // Neural-only evaluation, same perspective-flip semantics as
-    // SakkirinaNeural's original Evaluate(). Factored out so both the
-    // alpha<=0 short circuit and the blended path below share the exact same
-    // logic instead of duplicating it. Takes the evaluator explicitly
-    // (rather than re-reading the _evaluator field) so its non-nullness,
-    // already established at the call site, doesn't need re-checking here.
+    // Neural-only evaluation, used directly whenever alpha is saturated to 0.
+    // Factored out so both the alpha<=0 short circuit and the blended path
+    // below share the exact same logic instead of duplicating it. Takes the
+    // evaluator explicitly (rather than re-reading the _evaluator field) so
+    // its non-nullness, already established at the call site, doesn't need
+    // re-checking here.
     double EvaluateNeural(ValueNetworkEvaluator evaluator, SeededGameState gameState, PlayerEnum playerID)
     {
         var (nodeFeatures, _, globalFeatures) = FeatureExtractor.ParseState(gameState, false);
@@ -435,40 +429,38 @@ public class DeepSetsBlendBotTrim : AI
     // Active evaluator: same signature and semantics as EvaluateHeuristic above
     // (a pseudo-win-probability in [0,1] for playerID), now a linear blend of
     // EvaluateHeuristic and the DeepSets value network, weighted by
-    // _currentAlpha (frozen once per Play() call -- see Play() below, and the
+    // _currentAlpha (frozen once per Play() call; see Play() below, and the
     // ALPHA_* consts above for why).
     //
     // alpha is saturated (exactly 0.0 or exactly ALPHA_START/1.0, never a
-    // rounding-error-adjacent value -- see ComputeAlpha) for most of the
+    // rounding-error-adjacent value; see ComputeAlpha) for most of the
     // game: in particular alpha hits exactly 0.0 for every turn once the
     // prestige clock crosses ALPHA_ZERO_ABOVE, which by design is most of the
     // game. Computing the other evaluator in that case would just be
     // computing a value that gets multiplied by zero and discarded, so both
-    // saturated ends short-circuit to a single evaluator call below --
-    // restoring SakkirinaNeural's own network-only throughput for those
-    // turns. Only turns where alpha is strictly between 0 and 1 (the blend
-    // zone -- early game, before the clock crosses ALPHA_ZERO_ABOVE) still
-    // run both evaluators on every leaf. See GameEnd's throughput log.
+    // saturated ends short-circuit to a single evaluator call below,
+    // restoring network-only throughput for those turns. Only turns where
+    // alpha is strictly between 0 and 1 (the blend zone, early game, before
+    // the clock crosses ALPHA_ZERO_ABOVE) still run both evaluators on every
+    // leaf. See GameEnd's throughput log.
     //
     // EvaluateHeuristic returns 1/(1+exp(-value/900)), a pseudo-probability
     // whose scale is tuned to that heuristic's hand-picked constants, while
-    // the network returns a calibrated win probability -- these are not
+    // the network returns a calibrated win probability; these are not
     // strictly commensurable, and alpha is what absorbs that mismatch. Do not
     // "fix" this by rescaling either side; it's deliberate, per design.
     //
     // The network outputs P(gameState.CurrentPlayer wins), so it must be
-    // negated whenever playerID isn't the state's current player -- exactly
-    // the same perspective-flip logic as ISMCTSBot's END_TURN handling,
-    // tracked the same way so the flip rate can be verified from the log.
+    // negated whenever playerID isn't the state's current player.
     // EvaluateHeuristic performs its own, separate perspective resolution
     // internally (it reassigns local currentPlayer/enemyPlayer by comparing
     // playerID against gameState.CurrentPlayer.PlayerID). Both were verified
     // by inspection to return "high = good for playerID" for the same
-    // (gameState, playerID) -- see EvaluateHeuristic's own >=80/prestige
+    // (gameState, playerID); see EvaluateHeuristic's own >=80/prestige
     // instant-win-or-loss short circuits (return 1 / return 0) for the
-    // clearest confirmation of its convention -- and are additionally cross-
-    // checked at runtime, for turns that land in the blend zone, via the
-    // bounded PerspectiveCheck log below.
+    // clearest confirmation of its convention. They are additionally
+    // cross-checked at runtime, for turns that land in the blend zone, via
+    // the bounded PerspectiveCheck log below.
     double Evaluate(SeededGameState gameState, PlayerEnum playerID)
     {
         _totalEvalCalls++;
@@ -583,7 +575,7 @@ public class DeepSetsBlendBotTrim : AI
         CardId.KNIGHT_COMMANDER, // heal
         // Crow
         CardId.BLACKFEATHER_KNIGHT,
-        // Allesia
+        // Alessia
         CardId.ALESSIAN_REBEL,
         CardId.MORIHAUS_SACRED_BULL, // knockout, my opes +3
     };
@@ -599,9 +591,9 @@ public class DeepSetsBlendBotTrim : AI
         CardId.GOODS_SHIPMENT, // Hlaalu
         CardId.WAR_SONG, // Red Eagle
         CardId.PECK, // Crow
-        CardId.ALESSIAN_REBEL, // Allesia
+        CardId.ALESSIAN_REBEL, // Alessia
         CardId.FORTIFY, // Pellin
-        CardId.SWIPE, // Rahjin
+        CardId.SWIPE, // Rajhin
         CardId.MAINLAND_INQUIRIES, // Psijic
         CardId.SEA_ELF_RAID, // Orgnum 1P + 1C
         CardId.BEWILDERMENT
@@ -713,7 +705,7 @@ public class DeepSetsBlendBotTrim : AI
         foreach (var (patron, pId) in gameState.PatronStates.All) {
             if (patron == PatronId.TREASURY) continue;
             if (pId == playerID) myPatronFavour += 1;
-            else if (pId == PlayerEnum.NO_PLAYER_SELECTED) { /* neutral -- counted in neither; kept as its own branch so it doesn't fall through to enemyPatronFavour below */ }
+            else if (pId == PlayerEnum.NO_PLAYER_SELECTED) { /* neutral: counted for neither side */ }
             else enemyPatronFavour += 1;
         }
         List<UniqueCard> myCards = currentPlayer.Hand.Concat(currentPlayer.Played.Concat(currentPlayer.CooldownPile.Concat(currentPlayer.DrawPile))).ToList();
@@ -874,7 +866,6 @@ public class DeepSetsBlendBotTrim : AI
                 logits[i] = Math.Exp((logits[i] - bestScore) / temperature);
                 sum += logits[i];
             }
-            //for (int i = 0; i < logits.Length; i++) Console.WriteLine("{0} {1}", moves[i], logits[i] / sum);
             double r = sum * rng.Next() / int.MaxValue;
             for (int i = 0; i < logits.Length; i++) {
                 sum -= logits[i];
@@ -903,7 +894,7 @@ public class DeepSetsBlendBotTrim : AI
 
     double MoveSimulate(SeededGameState gameState, Move move, SeededRandom rng)
     {
-        var (newGameState, newPossibleMoves) = gameState.ApplyMove(move);//, (ulong)rng.Next());
+        var (newGameState, newPossibleMoves) = gameState.ApplyMove(move);
         return Simulate(newGameState, newPossibleMoves, rng, move.Command == CommandEnum.END_TURN);
     }
 
@@ -926,17 +917,10 @@ public class DeepSetsBlendBotTrim : AI
         return value;
     }
 
-    // Defense in depth alongside the HashMove fixes below and the null-move
-    // fallback in Play(): root cause of the crash that used to surface here was
-    // found -- Play() could pass ProceedTree a null move (see the comment above
-    // the fallback in Play() for the full mechanism), which threw inside the
-    // inlined AreIsomorphic call with no frame appearing below ProceedTree in a
-    // Release stack trace. With that fixed at the source, this catch should
-    // never fire again -- kept anyway because tree-reuse detection failing for
-    // ANY reason should cost a cache miss, not the game. Falls back to
-    // rootNode = null (the method's own existing "no reuse" outcome) on any
-    // exception, logging the first occurrence with full details in case
-    // something else ever trips it.
+    // Defense in depth: any failure in tree-reuse detection below should cost
+    // a cache miss, not the game, so this falls back to no reuse (rootNode =
+    // null) on any exception rather than letting it propagate. Logs the first
+    // occurrence with full details in case something trips it.
     private bool _firstProceedTreeExceptionLogged = false;
 
     // Counts how often Play()'s null-move fallback below actually fires.
@@ -971,9 +955,9 @@ public class DeepSetsBlendBotTrim : AI
         rootNode = null;
     }
 
-    // Load the ONNX model for Evaluate() above, mirroring ISMCTSBot.PregamePrepare.
-    // Falls back to EvaluateHeuristic (not a silent 0.5) if the model fails to
-    // load, since a perfectly good evaluator already exists in this same file.
+    // Loads the ONNX model for Evaluate() above. Falls back to
+    // EvaluateHeuristic (not a silent 0.5) if the model fails to load, since
+    // a perfectly good evaluator already exists in this same file.
     public override void PregamePrepare()
     {
         _gameWallClock.Restart();
@@ -1024,11 +1008,11 @@ public class DeepSetsBlendBotTrim : AI
         myPlayerID = gameState.CurrentPlayer.PlayerID;
 
         // Alpha is frozen HERE, once per Play() call, from this call's root
-        // state -- see the ALPHA_* consts and _currentAlpha field above, and
-        // the CRITICAL note there about why this must not happen per leaf.
+        // state; see the ALPHA_* consts and _currentAlpha field above, and
+        // the note there about why this must not happen per leaf.
         // gameState.CurrentPlayer is always us at this point (we're the one
         // being asked for a move), so CurrentPlayer/EnemyPlayer here really
-        // are my/enemy prestige -- the same max(mine, theirs) / 40 formula
+        // are my/enemy prestige, the same max(mine, theirs) / 40 formula
         // FeatureExtractor uses for global feature index 13 (PrestigeClock).
         double prestigeClock = Math.Max(gameState.CurrentPlayer.Prestige, gameState.EnemyPlayer.Prestige) / 40.0;
         _currentAlpha = ComputeAlpha(prestigeClock);
@@ -1053,7 +1037,7 @@ public class DeepSetsBlendBotTrim : AI
             BotLog.Write($"DeepSetsBlendBotTrim.Play: turn start -- prestigeClock={prestigeClock.ToString("F4", CultureInfo.InvariantCulture)}, " +
                          $"resolvedAlpha={_currentAlpha.ToString("F4", CultureInfo.InvariantCulture)}");
             // Refresh the perspective-check budget every turn (not just once
-            // for the whole game) -- a game-wide budget only ever samples the
+            // for the whole game); a game-wide budget only ever samples the
             // first tree search, i.e. the opening position, which is close to
             // 0-0 prestige and too symmetric to be a meaningful check of
             // sign agreement. Sampling a couple of evaluations per turn
@@ -1099,18 +1083,11 @@ public class DeepSetsBlendBotTrim : AI
             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
         }
 
-        // Root cause of both crash reports: `move` was overwritten to
-        // RootRuleBasedMove(...)'s result above and is only reassigned inside
-        // the foreach just above -- if bestMove (picked from a tree that may
-        // have been built under a different determinization) has no isomorphic
-        // match in the CURRENT possibleMoves, move is still null here.
-        // ProceedTree(null) then throws inside the inlined AreIsomorphic (no
-        // frame appears below ProceedTree in a Release stack trace, which is
-        // why this looked like a ProceedTree-local bug), and separately, a null
-        // Move returned to the engine makes EndGame's move-history logging
-        // throw too. bestMove itself is not a safe substitute -- it may not be
-        // legal in the current (re-determinized) state -- so fall back to
-        // possibleMoves[0], which always is.
+        // bestMove comes from a search tree that may have been built under a
+        // different determinization, so it can have no isomorphic match in the
+        // current possibleMoves, leaving `move` null here. bestMove itself is
+        // not a safe substitute, since it may not be legal in this exact state,
+        // so this falls back to possibleMoves[0], which always is.
         if (move is null)
         {
             _noIsomorphicMatchCount++;
@@ -1157,16 +1134,12 @@ public class DeepSetsBlendBotTrim : AI
     // I would like to express our deepest gratitude to the author.
     class MoveComparer
     {
-        // Release inlining collapses these into ProceedTree's frame in a stack
-        // trace, making a NullReferenceException here look like it came from
-        // there. Each `as` cast below used to be followed by a null-forgiving
-        // `!` dereference with no actual check -- if a move's concrete runtime
-        // type doesn't match what Command implies, the cast silently yields
-        // null and `!` throws, forfeiting the whole game. A hash collision
-        // between two unrecognised moves only costs a missed tree-reuse
-        // opportunity (harmless), so every site below now falls back to a
-        // Command-only hash instead of throwing, logging the first occurrence
-        // of each so the actual offending type is known.
+        // If a move's concrete runtime type doesn't match what its Command
+        // implies, the cast below yields null. A hash collision between two
+        // unrecognised moves only costs a missed tree-reuse opportunity
+        // (harmless), so every site below falls back to a Command-only hash
+        // instead of dereferencing a possibly-null cast, logging the first
+        // occurrence of each so the actual offending type is known.
         private static bool _firstUnrecognisedPatronMoveLogged = false;
         private static bool _firstUnrecognisedChoiceMoveLogged = false;
         private static bool _firstUnrecognisedCardMoveLogged = false;

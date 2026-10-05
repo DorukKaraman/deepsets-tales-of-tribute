@@ -2,39 +2,27 @@
 Check that experiments/bots/DeepSetsBotExp.cs, with none of its environment
 variables set, plays the same moves as the submitted Bots/src/DeepSetsBlendBot.cs.
 
-DeepSetsBotExp is a copy of DeepSetsBlendBot with three environment hooks
-(SOT_ALPHA0, SOT_TIME_SCALE, SOT_MODEL_PATH) whose defaults are the
-submission's own constants. If that claim is true, an unset environment must
-reproduce the submission's play. This runs both agents against the same
-opponent from the same seed and compares their move sequences.
+DeepSetsBotExp is DeepSetsBlendBot with three environment hooks (SOT_ALPHA0,
+SOT_TIME_SCALE, SOT_MODEL_PATH) that default to the submission's constants.
+This runs both agents against the same opponent from the same seed and compares
+their move sequences.
 
-READ THIS BEFORE FILING A BUG ON A DIVERGENCE. The search is WALL-CLOCK
-budgeted: `while (s.Elapsed < timeForMoveComputation) TreeSearch(...)`. How
-many iterations fit into 0.65 seconds depends on machine load, JIT warm-up,
-CPU frequency and GC timing, none of which a seed controls. Two runs of the
-SAME binary on the same seed can therefore pick different moves, and the two
-sequences drift apart permanently once they do, because from that point on the
-agents are playing different games.
+The search has a wall-clock budget, so the number of iterations per move
+depends on load, JIT warm-up, CPU frequency and GC timing, not on the seed. Two
+runs of the same binary can pick different moves, after which the games differ
+for good. The script therefore reports the index of the first differing move,
+to be read against a baseline:
 
-So a divergence here is evidence of nothing on its own. What this script
-reports is the INDEX at which the sequences first differ, and the honest way to
-read it is comparatively:
+  * --self-check runs DeepSetsBlendBot against itself twice on the same seed,
+    giving the divergence that timing alone produces.
+  * If DeepSetsBotExp diverges no earlier than that, the result is consistent
+    with the two agents being identical, though it does not prove it.
+  * A divergence at move 0 or 1, reproducible across seeds, points to a real
+    difference, most likely a mis-defaulted environment variable.
 
-  * Run --self-check to get the baseline: DeepSetsBlendBot against itself, same
-    seed, two separate runs. That is the divergence a pure timing difference
-    produces, with no code difference at all.
-  * If DeepSetsBotExp diverges no earlier than that baseline does, the
-    comparison is consistent with the two agents being identical. It does not
-    prove it.
-  * A divergence at move 0 or 1, reproducible across seeds and well before the
-    self-check baseline, is a real signal worth chasing -- most likely a
-    mis-defaulted environment variable.
-
-The comparison uses GameRunner's --log-training-data wrapper, which records the
-GameState and the chosen move for every Play() call. Note the wrapper only
-writes its buffer for cleanly-ended games (PRESTIGE_OVER_40/80, PATRON_FAVOR);
-a seed whose game ends in a turn limit or a timeout produces no data and is
-reported as such rather than counted as agreement.
+Moves come from GameRunner's --log-training-data wrapper, which writes only
+cleanly ended games (PRESTIGE_OVER_40/80, PATRON_FAVOR). A seed whose game ends
+otherwise yields no data and is reported as such.
 
 Usage:
     python experiments/verify_exp_bot_parity.py                       # default seed
@@ -63,17 +51,15 @@ DEFAULT_MOVES = 10
 
 def run_game(binary, bot, opponent, seed, timeout, data_dir):
     """One game, bot as P1, with per-turn (state, move) logging. Returns the
-    list of moves P1 chose, or None if the game did not end cleanly (the
-    logging wrapper discards the buffer in that case)."""
+    moves P1 chose, or None if the game did not end cleanly."""
     os.makedirs(data_dir, exist_ok=True)
     cmd = [binary, bot, opponent, "--runs", "1", "--timeout", str(timeout),
            "--seed", str(seed), "--patrons", PATRONS,
            "--log-training-data", "--data-dir", data_dir]
 
     env = os.environ.copy()
-    # The whole question is what DeepSetsBotExp does with NOTHING set. An
-    # exported SOT_ALPHA0 in the calling shell would quietly answer a different
-    # one.
+    # Test the bot with nothing set; an SOT_ALPHA0 exported in the calling shell
+    # would test a different configuration.
     for key in ("SOT_ALPHA0", "SOT_TIME_SCALE", "SOT_MODEL_PATH", "SOT_LOG",
                 "SOT_LOG_FILE", "SOT_DUMP_DIR"):
         env.pop(key, None)

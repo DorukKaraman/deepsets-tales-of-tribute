@@ -12,8 +12,8 @@ the verification and benchmarking harnesses. Start with
 **[REPRODUCE.md](REPRODUCE.md)** for the end-to-end pipeline.
 
 It is a fork of [ScriptsOfTribute-Core](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core),
-the official competition engine. The upstream project's own README is preserved
-at [docs/upstream-README.md](docs/upstream-README.md).
+the official competition engine. For the engine's own documentation, see the
+[upstream repository](https://github.com/ScriptsOfTribute/ScriptsOfTribute-Core).
 
 ---
 
@@ -79,9 +79,8 @@ Ours are:
 ### Derived work versus redistribution
 
 `Bots/src/DeepSetsBot.cs` and `DeepSetsBlendBot.cs` contain SakkirinaSolo's
-search and are published here as derived works, attributed above and in
-[docs/SUBMISSION.md](docs/SUBMISSION.md); that is the same form in which they
-were submitted to the competition. Distributing an agent that is *substantially
+search and are published here as derived works, attributed above; that is the
+same form in which they were submitted to the competition. Distributing an agent that is *substantially
 unmodified* SakkirinaSolo under a new name would be republishing someone else's
 competition entry rather than building on it, so we do not do that: the
 baselines are fetched from the official archive rather than copied into this

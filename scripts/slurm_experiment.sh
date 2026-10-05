@@ -1,62 +1,54 @@
 #!/usr/bin/env bash
 # SLURM array template for the paper's experiment configs (experiments/configs/):
-# one array task = one game = one process, exactly as scripts/slurm_benchmark.sh
-# does for the legacy 10-matchup benchmark. The only difference is that WHICH
-# experiment runs comes from a config file, chosen at submission time.
+# one array task = one game = one process, as in scripts/slurm_benchmark.sh, with
+# the experiment chosen by a config file at submission time.
 #
-# WHY ONE GAME PER TASK: GameRunner reuses a bot instance across --runs N and
-# its GameEndStatsCounter only reports aggregate counts, with no way to tell
-# which end reason produced which winner. --runs 1 per process is what lets
-# every game's outcome -- including a loss caused by a timeout rather than by
-# play -- be attributed exactly. Concurrency comes entirely from SLURM running
-# multiple array elements at once (the %N throttle), not from anything here.
+# One game per task because GameRunner reuses a bot instance across --runs N and
+# GameEndStatsCounter reports only aggregate counts. --runs 1 per process
+# attributes every game's outcome exactly, including a loss by timeout.
+# Concurrency comes from SLURM running array elements in parallel (the %N
+# throttle).
 #
-# CLUSTER DETAILS (RWTH CLAIX): partition c23ms, 1 core/task, ~2GB/core, no
-# --account needed, .NET via `source $HOME/tot/env.sh`, repo at
-# $HOME/tot/deepsets-tales-of-tribute. Edit below if yours differs.
+# Cluster details (RWTH CLAIX): partition c23ms, 1 core/task, ~2GB/core, no
+# --account, .NET via `source $HOME/tot/env.sh`, repo at
+# $HOME/tot/deepsets-tales-of-tribute. Edit below if yours differ.
 #
 # ---------------------------------------------------------------------------
-# CHOOSING THE EXPERIMENT
+# Choosing the experiment
 #
 #   sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep  --array=0-1999%32 scripts/slurm_experiment.sh
 #   sbatch --export=ALL,SOT_EXP_CONFIG=time_scaling --array=0-1999%32 scripts/slurm_experiment.sh
 #
-# --export=ALL,... is required, not optional: without ALL, SLURM replaces the
-# whole environment rather than adding to it, and `source $HOME/tot/env.sh`
-# below would run in a stripped shell.
+# --export=ALL,... is required: without ALL, SLURM replaces the environment
+# instead of adding to it, and `source $HOME/tot/env.sh` runs in a stripped shell.
 #
-# ALWAYS PRINT THE PLAN FIRST. It gives the exact task-id range of every
-# matchup, which is what you put in --array:
+# Print the plan first; it gives each matchup's task-id range for --array:
 #
 #   tools/benchmark_cluster.sh --config <name> --out-dir "$OUT_DIR" --dry-run
 #
-# ARRAY SIZE / CHUNKING: the arrays here (2000 tasks) may exceed this cluster's
-# MaxArraySize (`scontrol show config | grep -i MaxArraySize` on the login
-# node -- a site-wide setting this script cannot see or work around). Submit in
-# chunks if so; each chunk is a fully independent submission with no
-# coordination needed:
+# Array size: 2000-task arrays may exceed the site's MaxArraySize
+# (`scontrol show config | grep -i MaxArraySize` on the login node). If so,
+# submit independent chunks:
 #   sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep --array=0-999%32    scripts/slurm_experiment.sh
 #   sbatch --export=ALL,SOT_EXP_CONFIG=alpha_sweep --array=1000-1999%32 scripts/slurm_experiment.sh
+# If the account limits submitted jobs, use scripts/slurm_experiment_batched.sh.
 #
-# --time IS PER TASK (one game), and one game's cost scales with the config's
-# per-turn budget. The default below is sized for the most expensive row of
-# time_scaling (30s/turn); it is wildly generous for alpha_sweep and costs
-# nothing but scheduling priority to leave that way. If your fair-share
-# punishes over-requesting, submit alpha_sweep with `sbatch --time=00:15:00`.
+# --time is per task (one game), and a game's cost scales with the config's
+# per-turn budget. The default below covers time_scaling's 30s/turn row and is
+# generous for alpha_sweep; if over-requesting costs fair-share, submit
+# alpha_sweep with `sbatch --time=00:15:00`.
 #
 #   alpha_sweep   (10s/turn)  ~60-90s per game
 #   time_scaling  (2s/turn)   ~20-30s per game
 #   time_scaling  (30s/turn)  ~5-8 min per game
 #
-# RESUMABLE. Every task writes a result JSON file only after its one game
-# completes successfully. A task whose result file already exists is skipped
-# immediately without running anything, so re-submitting any chunk (or the
-# whole array) is always safe -- only genuinely missing/failed tasks do work.
+# Resumable: a task writes its result JSON only after its game completes, and a
+# task whose result file exists is skipped, so resubmitting any chunk is safe.
 #
-# SETUP (do this BEFORE sbatch-ing, not after):
-#   1. Clone FRESH, into a NEW directory. Do NOT pull into an existing
-#      $HOME/tot/ScriptsOfTribute-Core -- that is a different, older
-#      repository, and none of the experiment configs or agents exist in it.
+# Setup, before sbatch:
+#   1. Clone into a new directory, not an existing $HOME/tot/ScriptsOfTribute-Core
+#      checkout, which is a different repository without the experiment configs
+#      and agents.
 #        source $HOME/tot/env.sh
 #        mkdir -p $HOME/tot
 #        git clone -b experiments \
@@ -67,10 +59,9 @@
 #        dotnet build Bots/Bots.csproj -c Release
 #        dotnet build GameRunner/GameRunner.csproj -c Release
 #   2. mkdir -p $HOME/tot/deepsets-tales-of-tribute/logs
-#      SLURM does NOT create the directory for #SBATCH --output/--error; if it
-#      does not exist at submission time, every task fails before this script's
-#      body even runs.
-#   3. Preview the plan (see ALWAYS PRINT THE PLAN FIRST above).
+#      SLURM does not create the directory for #SBATCH --output/--error; if it is
+#      missing, every task fails before this script runs.
+#   3. Preview the plan (see above).
 #   4. Submit.
 
 #SBATCH --job-name=deepsets_exp
@@ -82,24 +73,18 @@
 #SBATCH --output=logs/exp_%A_%a.out
 #SBATCH --error=logs/exp_%A_%a.err
 
-# --output/--error above are RELATIVE (to wherever `sbatch` is invoked from) on
-# purpose: #SBATCH directives are parsed by sbatch itself and do not reliably
-# expand shell variables like $HOME, so an absolute path would need a literal,
-# pre-resolved home directory hardcoded here. This is why the SETUP steps have
-# you `cd $HOME/tot/deepsets-tales-of-tribute` before sbatch-ing.
+# --output/--error are relative to the directory sbatch runs in, because sbatch
+# does not reliably expand shell variables like $HOME in #SBATCH directives.
+# Submit from $HOME/tot/deepsets-tales-of-tribute.
 
 set -euo pipefail
 
 # --- Edit if your setup differs from the CLUSTER DETAILS above ---
 REPO_ROOT="$HOME/tot/deepsets-tales-of-tribute"   # the fresh clone; see SETUP above
 CONFIG="${SOT_EXP_CONFIG:-}"             # set via --export=ALL,SOT_EXP_CONFIG=...
-OUT_DIR_BASE="$HOME/tot/experiment_results"  # small JSON files, not bulk data,
-                                              # so $HOME is fine here -- unlike
-                                              # the /hpcwork/... paths the
-                                              # data-generation runs need
-# Seed base comes from the config file itself (each experiment has its own), so
-# it is fixed across the whole array and every resubmission by construction.
-# Override here only if you deliberately want a second independent replicate.
+OUT_DIR_BASE="$HOME/tot/experiment_results"  # small JSON files, so $HOME is fine
+# The seed base comes from the config, so it is fixed across the array and every
+# resubmission. Override only for a second independent replicate.
 SEED_BASE=""
 # -------------------------------------------------------------
 
@@ -112,9 +97,8 @@ if [ -z "$CONFIG" ]; then
   exit 1
 fi
 
-# One output directory per config: two experiments must never pool their result
-# files, and the per-matchup subdirectory names alone would not stop them
-# (nothing forbids two configs from using the same label).
+# One output directory per config, so two experiments never pool result files
+# even if they share a matchup label.
 OUT_DIR="$OUT_DIR_BASE/$CONFIG"
 
 source "$HOME/tot/env.sh"

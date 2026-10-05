@@ -1,48 +1,20 @@
 """
-Train a flat-MLP baseline -- the ablation that tests whether the DeepSets
-structure contributes, or whether the 99-dim card features alone carry the
-result.
+Train a flat-MLP baseline for the DeepSets ablation.
 
-This is an ENTRY POINT, not a training implementation. The loop, optimizer,
-scheduler, seeding, per-prestige-bucket metrics and checkpointing all come from
-train_local.train_model; the only thing passed in is which model to build. That
-matters for the ablation specifically: if the two arms had separate training
-code, any difference in val loss could be a difference in how they were trained,
-and the comparison would be worth nothing. They share one loop, one dataset
-class, one shuffle buffer size and one seeding scheme, so a given --seed streams
-the identical batches in the identical order to both.
+The loop, optimizer, seeding, metrics and checkpointing are those of
+train_local.train_model; this only chooses the model, so a given --seed gives
+every arm the same batches in the same order. Arguments and outputs match
+train_local.py, and run_config.json also records the arch and layer widths.
 
     python training/train_flat.py --arch matched \\
         --train-dir $SPLIT/train --val-dir $SPLIT/val \\
         --epochs 3 --batch-size 256 --lr 5e-4 --seed 0 --out-dir $OUT
 
-Arguments and artefacts match train_local.py exactly -- best_model.pth, a
-per-epoch checkpoint, training_metrics.json, run_config.json -- so
-scripts/slurm_train.sh's structure applies unchanged, with --arch added and the
-export step pointed at export_flat_to_onnx.py. run_config.json additionally
-records arch, widths, input dim and parameter count, so a directory of runs is
-self-describing when it comes time to put the numbers in a table.
+  --arch matched         12,691 -> 5 -> 128 -> 64 -> 1        72,549 params
+  --arch wide            12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 params
+  --arch matched_sorted  as matched, with the node rows in canonical order
 
-  --arch matched         12,691 -> 5 -> 128 -> 64 -> 1        72,549 params (0.99x DeepSets)
-  --arch wide            12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 params (22.57x)
-  --arch matched_sorted  identical to matched, but the node rows are put into a
-                         canonical order before flattening -- same widths, same
-                         72,549 parameters, so the only difference is permutation
-                         invariance
-
-Run all three. "matched" asks whether the set structure helps at equal
-capacity; "wide" asks whether it helps even when the flat model has 22x the
-capacity, and only "wide" answers the objection that the matched model was
-starved. "matched_sorted" answers a different objection: that an unsorted flat
-baseline is naive, since the standard way to feed a set to an MLP is to sort it
-canonically first. Without it, the gap in GAMES conflates a worse evaluator
-with the absence of permutation invariance -- and the agent's search reshuffles
-hidden piles on every determinisation, which measurably moves an unsorted flat
-model's output more than a real move does.
-
-See ValueNetworkFlat for why matched is a 5-unit first layer, and why that is a
-property of flattening a 12,691-dim input on a 73k budget rather than a choice
-that could have been made differently.
+See ValueNetworkFlat for what each arm is meant to test.
 """
 
 import argparse
@@ -79,11 +51,8 @@ def main():
     h1, h2, h3 = FLAT_CONFIGS[args.arch]
     shape = f"{FLAT_DIM}->{h1}->{h2}->{h3}->1"
 
-    # Built once here only to report the count before the run starts; the real
-    # model is constructed by the factory inside train_model, AFTER seeding, so
-    # this throwaway must not touch the global RNG order that matters. It does
-    # draw from the torch RNG, but train_model calls seed_everything before
-    # building anything, which resets it.
+    # Built only to report the parameter count. train_model seeds before it
+    # constructs the real model, so drawing from the RNG here is harmless.
     _, probe = build_flat_model(args.arch)
     n_params = count_parameters(probe)
 

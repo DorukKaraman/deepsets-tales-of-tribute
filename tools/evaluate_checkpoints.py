@@ -1,53 +1,23 @@
 """
-Score any number of .pth checkpoints on ONE common dataset directory.
+Score .pth checkpoints on one common dataset directory.
 
-Reports, per checkpoint: BCE loss, accuracy, ROC AUC and Brier score, overall
-and bucketed by prestige clock, each alongside that slice's majority-class
-baseline accuracy. Ends with a side-by-side table so the checkpoints can be
-ranked at a glance.
+Reports BCE loss, accuracy, ROC AUC and Brier score per checkpoint, overall and
+by prestige-clock bucket, each beside that slice's majority-class baseline,
+then a side-by-side table. The dataset is streamed once and every checkpoint
+scores each batch, so all of them see the same samples in the same order.
 
-WHAT THIS IS FOR: comparing per-seed models (scripts/slurm_train.sh) against
-each other and against the shipped one, on data none of them were trained on.
-Generate that data with
+DeepSets and flat-MLP checkpoints can be mixed. DeepSets checkpoints are
+recognised by their keys. A flat checkpoint's arch cannot be read off its
+weights (matched and matched_sorted have identical shapes), so it comes from
+the run_config.json beside the checkpoint's real path, or from --arch.
 
-    tools/generate_data.sh --games N --out-dir <dir> \\
-        --bot-a DeepSetsBotExp --bot-b SakkirinaSolo --seed-base <n>
+Checkpoints are scored through the exported forward pass, which takes a plain
+per-graph mean over nodes rather than global_mean_pool (see export_to_onnx.py).
 
-Neither shipped model was trained on games between those two agents, so the
-resulting set is genuinely held out -- which a fresh self-play set from the
-same generator would not be, however new its games are.
+    python tools/evaluate_checkpoints.py A.pth B.pth --data-dir <dir> \\
+        [--per-state-out scores.csv.gz] [--json-out scores.json]
 
-ONE PASS, ALL MODELS. The dataset is streamed once and every checkpoint is
-evaluated on each batch as it goes, rather than re-read per checkpoint. That is
-not (only) about speed: it is what guarantees all checkpoints are scored on
-byte-identical samples in identical order, which is the entire point of a
-common evaluation set. Memory stays bounded by --batch-size, so a
-multi-gigabyte directory does not have to fit in RAM.
-
-BOTH ARCHITECTURES, ONE TABLE. DeepSets checkpoints (training/ValueNetwork.py)
-and flat-MLP ablation checkpoints (training/ValueNetworkFlat.py) can be passed
-in the same invocation; the architecture is detected from the checkpoint's own
-keys, not from a flag, so the two cannot be scored through each other's forward
-pass by mistake. Mixing them is the intended use: the ablation's question is
-whether the set structure contributes, and the only honest way to ask it is to
-score both on byte-identical samples rather than to compare two separate
-validation passes.
-
-THE FORWARD PASS HERE IS THE EXPORTED ONE, not TributeValueNetwork.forward.
-The two differ in exactly one place: this takes a plain per-graph mean over
-nodes where the training model calls torch_geometric's global_mean_pool. They
-are arithmetically identical for a single graph, and the plain mean is what
-training/export_to_onnx.py puts in the ONNX file -- i.e. what the agent
-actually runs. Scoring a checkpoint through the path it will be deployed on is
-the useful measurement; see export_to_onnx.py's ONNXWrapper for why the export
-bypasses global_mean_pool in the first place (opset 14 lowers scatter-reduce
-without a reduction attribute, silently giving replace semantics instead of an
-average).
-
-Read-only. Does not modify any checkpoint or data file.
-
-Requirements: torch, torch_geometric (for training/StateParser.py's Data
-container), scikit-learn, numpy. See scripts/setup_python_env.sh.
+Read-only. Needs torch, torch_geometric, scikit-learn and numpy.
 """
 import argparse
 import glob
@@ -75,15 +45,9 @@ except ImportError as e:  # pragma: no cover - environment problem, not logic
 
 from sklearn.metrics import brier_score_loss, roc_auc_score  # noqa: E402
 
-# Global feature index 13 is the prestige clock (see
-# StateParser.extract_global_context). A named constant, not a bare literal,
-# because this index already drifted once: it moved 16 -> 13 when TREASURY was
-# dropped from the patron favour block, and tools/diagnose_value_net.py kept
-# reading column 16 -- silently the wrong column, not a crash -- until a full
-# dry run caught the mismatched bucket counts.
+# Index of the prestige clock in the global vector (see StateParser).
 PRESTIGE_CLOCK_GLOBAL_INDEX = 13
-# Identical to training/train_local.py's, on purpose: a checkpoint's score here
-# has to be comparable to the validation numbers printed while it trained.
+# Same buckets as train_local.py, so scores here match its validation output.
 PRESTIGE_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, float("inf"))]
 
 EPS = 1e-7
@@ -106,12 +70,9 @@ def bucket_label(i):
 # --------------------------------------------------------------------------
 
 class DeployedValueNetwork(torch.nn.Module):
-    """TributeValueNetwork's three MLPs, wired the way the exported ONNX graph
-    wires them (plain per-graph mean instead of global_mean_pool). Built from
-    the checkpoint's own tensor shapes rather than hardcoded dimensions, so a
-    checkpoint trained at a different hidden size still loads -- and one whose
-    input dimension does not match the current feature schema fails loudly here
-    instead of scoring garbage."""
+    """TributeValueNetwork's three MLPs, wired as in the exported ONNX graph
+    (a plain per-graph mean in place of global_mean_pool). Built from the
+    checkpoint's tensor shapes, so a mismatched input dimension fails here."""
 
     def __init__(self, state_dict):
         super().__init__()
@@ -148,30 +109,11 @@ class DeployedValueNetwork(torch.nn.Module):
 
 
 class DeployedFlatNetwork(torch.nn.Module):
-    """The flat-MLP ablation (training/ValueNetworkFlat.py), behind the same
-    forward signature as DeployedValueNetwork so both can be scored side by
-    side on one pass of one dataset.
+    """The flat-MLP network behind DeployedValueNetwork's forward signature,
+    so both kinds can be scored in one pass. Padding goes through StateParserFlat.
 
-    That side-by-side is the whole point: a flat model and a DeepSets model
-    compared from their own separate validation passes are comparable only as
-    far as the two passes happened to align, whereas here every model sees
-    byte-identical samples in identical order. Since the flat architecture is
-    the thing under test, that distinction is not a technicality.
-
-    Padding and flattening go through StateParserFlat.pad_and_flatten rather
-    than being rebuilt here, so this scores the layout the model was actually
-    trained on.
-
-    THE ARCH MUST BE PASSED IN. It cannot be read off the weights: `matched`
-    and `matched_sorted` are the SAME network with the same widths and the same
-    72,549 parameters, differing only in whether the node rows are sorted into
-    a canonical order before flattening. That difference lives in a plain
-    attribute on FlatGraphAdapter, not in a buffer, so it is not in the
-    state_dict at all. Inferring the arch from `mlp.*` keys would score a
-    sorted checkpoint through the unsorted path and silently report the wrong
-    number -- and it would look entirely plausible, because both models are
-    real models that produce real logits. load_checkpoint therefore resolves
-    the arch from run_config.json or an explicit override and refuses to guess.
+    arch must be given: matched and matched_sorted have identical shapes and
+    differ only in sorting, which the state_dict does not record.
     """
 
     def __init__(self, state_dict, arch):
@@ -198,12 +140,10 @@ class DeployedFlatNetwork(torch.nn.Module):
 
 
 def resolve_flat_arch(path, overrides):
-    """(arch, source) for a flat checkpoint, or (None, reason) if unresolvable.
+    """(arch, source) for a flat checkpoint, or (None, reason).
 
-    run_config.json is read from the checkpoint's REAL directory. Checkpoints
-    are routinely scored through symlinks -- the cluster job symlinks each
-    arm's best_model.pth to ckpts/deepsets.pth, ckpts/matched.pth and so on --
-    and the run_config.json sits next to the real file, not next to the link.
+    run_config.json is read from beside the checkpoint's real path, since
+    checkpoints are often scored through symlinks.
     """
     for key in (path, os.path.realpath(path)):
         if key in overrides:
@@ -227,21 +167,16 @@ def load_checkpoint(path, overrides=None):
     state_dict = torch.load(path, map_location="cpu")
     if not isinstance(state_dict, dict):
         raise ValueError(f"expected a state_dict, got {type(state_dict).__name__}")
-    # A full-object checkpoint (torch.save(model)) or a training checkpoint with
-    # the weights nested under a key -- unwrap the common shapes rather than
-    # failing on them.
+    # Unwrap a checkpoint that nests its weights under a "state_dict" key.
     if "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
         state_dict = state_dict["state_dict"]
 
-    # train_flat.py trains a FlatGraphAdapter wrapping the MLP, so its keys are
-    # prefixed "flat." -- strip it, as export_flat_to_onnx.py does.
+    # train_flat.py saves a FlatGraphAdapter, whose keys carry a "flat." prefix.
     if any(k.startswith("flat.mlp.") for k in state_dict):
         state_dict = {k[len("flat."):]: v for k, v in state_dict.items()
                       if k.startswith("flat.")}
 
-    # Dispatch on the checkpoint's own keys. A flat checkpoint has mlp.* and no
-    # node_encoder.*; guessing wrong here would score one architecture through
-    # the other's forward pass and report the result as an ablation.
+    # A flat checkpoint has mlp.* keys and no node_encoder.*.
     if any(k.startswith("mlp.") for k in state_dict):
         from StateParserFlat import FLAT_DIM
         from ValueNetworkFlat import FLAT_CONFIGS
@@ -304,13 +239,8 @@ def load_checkpoint(path, overrides=None):
 
 def iter_samples(data_dir, limit):
     """Streams (outcome, game_id, graph) from every *.jsonl.gz under data_dir,
-    in sorted shard order. Deterministic and unshuffled on purpose: every metric
-    here is order-independent, and a fixed order is what makes two invocations
-    of this script directly comparable.
-
-    game_id rides along because states within one game are highly correlated
-    and any honest significance test has to cluster on it -- see
-    tools/clustered_significance.py, which consumes --per-state-out."""
+    in sorted shard order, so repeated runs see the same order. game_id is kept
+    for the game-clustered tests in clustered_significance.py."""
     shards = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl.gz"), recursive=True))
     if not shards:
         raise FileNotFoundError(f"No *.jsonl.gz shards found under {data_dir}")
@@ -435,14 +365,8 @@ def main():
 
     models = OrderedDict()
     for path in args.checkpoints:
-        # Take as many trailing path components as it takes to be unique.
-        #
-        # One component was not enough, and the failure was silent: the three
-        # ablation arms live at <arch>/seed_00/best_model.pth, so the basename
-        # collides for all three AND so does basename-plus-parent ("seed_00/
-        # best_model"), and the later model simply overwrote the earlier one in
-        # the dict -- two rows reported where three were asked for. The cluster
-        # run happened to dodge it by symlinking the arms to distinct names.
+        # Use as many trailing path components as it takes to make the name unique;
+        # <arch>/seed_00/best_model.pth collides on the last two.
         parts = os.path.splitext(os.path.normpath(os.path.abspath(path)))[0].split(os.sep)
         name = parts[-1]
         for depth in range(2, len(parts) + 1):
@@ -466,9 +390,7 @@ def main():
     print("=" * 78)
     for name, entry in models.items():
         print(f"  {name:<28} {entry['path']}")
-        # The arch is printed WITH ITS SOURCE because for the flat models it is
-        # not recoverable from the weights, and scoring matched_sorted as
-        # matched produces a plausible wrong number rather than an error.
+        # A flat arch is not recoverable from the weights, so show where it came from.
         print(f"  {'':<28} arch: {entry['arch']}  (from {entry['arch_source']})")
     print()
 
@@ -476,17 +398,13 @@ def main():
     batch = []
     n_scored = 0
 
-    # Per-state rows are written as each batch is scored and never accumulated,
-    # so memory stays flat whatever the dataset size. Probabilities go out at
-    # 10 significant digits: float32 carries ~7, so nothing is lost, and
-    # tools/clustered_significance.py recomputes losses from these numbers and
-    # must land on the same p-values as scoring in-process.
+    # Per-state rows are streamed as each batch is scored. Ten significant digits
+    # keep every float32 bit, so clustered_significance.py reproduces these losses.
     per_state = None
     if args.per_state_out:
         per_state = gzip.open(args.per_state_out, "wt", newline="")
-        # A '#' preamble records which arch each column was scored as, since
-        # the column name alone cannot distinguish matched from matched_sorted.
-        # tools/clustered_significance.py skips leading '#' lines.
+        # A '#' preamble records each column's arch, which the column name does not;
+        # clustered_significance.py skips these lines.
         for n, e in models.items():
             per_state.write(f"# {n}\tarch={e['arch']}\tsource={e['arch_source']}"
                             f"\tpath={e['path']}\n")

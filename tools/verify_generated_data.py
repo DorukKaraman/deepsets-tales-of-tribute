@@ -1,30 +1,19 @@
 """
-Read-only pre-cluster gate for tools/generate_data.py output. Modifies
-nothing. Point it at a --data-dir (the directory generate_data.py wrote
-job_NNNN/ subdirectories into) and it streams every *.jsonl.gz shard found
-under it, recursively.
+Read-only check of tools/generate_data.py output before a cluster run. Streams
+every *.jsonl.gz shard under --data-dir, recursively.
 
-Two-pass-in-one-streaming-pass design: item 7 (opening diversity) needs each
-game's records from BOTH its bot1 and bot2 shards merged into true
-chronological order, but the two shards are separate files and may be visited
-in either order. Rather than a real two-pass read, each record is reduced
-immediately to a small tuple (player, completed_actions_len, action,
-outcome) and appended to a per-game_id list; only these tuples are kept in
-memory, not full states, so this scales to a much larger run than 50 games
-without needing --limit. CurrentPlayer.PlayerID and Deck-id counts are
-accumulated as running Counters, not retained per-record.
+The opening-diversity check (item 7) needs each game's bot1 and bot2 records
+merged in chronological order, but they sit in separate shards. Each record is
+therefore reduced to a small tuple (player, completed_actions_len, action,
+outcome) kept per game_id, so memory stays small without --limit.
 
-"cards acquired" (item 7) is read as CommandEnum.BUY_CARD moves specifically
--- Move.CommandEnum has no ACQUIRE_CARD variant; ACQUIRE_CARD only exists as
-a CompletedActionType logged when a card EFFECT (e.g. "Acquire 4") pulls a
-card for free, which is not a move a bot ever explicitly chooses and isn't
-cleanly nameable from the action string. BUY_CARD is the only directly-logged
-top-level "a card entered someone's deck" event, and matches the methodology
-already used earlier in this session for opening-purchase analysis.
+"Cards acquired" in item 7 means BUY_CARD moves. Move.CommandEnum has no
+ACQUIRE_CARD; that exists only as a CompletedActionType for cards pulled in by
+a card effect, which no bot chooses as a move.
 
 Usage:
-    python3 tools/verify_generated_data.py /tmp/gen50
-    python3 tools/verify_generated_data.py /tmp/gen50 --limit 5000  # per-shard cap
+    python3 tools/verify_generated_data.py $DATA/gen50
+    python3 tools/verify_generated_data.py $DATA/gen50 --limit 5000  # per-shard cap
 """
 import argparse
 import glob
@@ -40,10 +29,9 @@ from itertools import combinations
 
 PROGRESS_INTERVAL = 50_000
 
-# CompletedActionType.END_TURN's ordinal in Engine/src/Board/CompletedAction.cs
-# (last entry in that enum). A state is "start of turn" under the exact same
-# rule SakkirinaGen.Play() itself uses to detect a fresh turn: no completed
-# actions yet, or the most recent one was an END_TURN.
+# Ordinal of CompletedActionType.END_TURN in Engine/src/Board/CompletedAction.cs.
+# A state is the start of a turn by SakkirinaGen.Play()'s rule: no completed
+# actions yet, or the last one was END_TURN.
 END_TURN_TYPE = 26
 
 COMPETITION_PATRONS = {"ANSEI", "DUKE_OF_CROWS", "RAJHIN", "ORGNUM", "PELIN", "SAINT_ALESSIA"}
@@ -73,8 +61,8 @@ def is_start_of_turn(state):
 
 
 def iter_all_cards(state):
-    """Every card object reachable from one state -- same traversal as
-    tools/verify_training_data.py's iter_all_cards, for the Deck-id check."""
+    """Every card object reachable from one state; the same traversal as
+    tools/verify_training_data.py's iter_all_cards."""
     cp = state.get("CurrentPlayer") or {}
     ep = state.get("EnemyPlayer") or {}
 
@@ -109,7 +97,6 @@ def main():
     if not shards:
         sys.exit(f"ERROR: no *.jsonl.gz shards found under {args.data_dir}")
 
-    # --- accumulators -----------------------------------------------------
     total_records = 0
     records_per_shard = {}
     records_per_role = Counter()          # "bot1" / "bot2" / "unknown"
@@ -188,7 +175,6 @@ def main():
              f"in {time.time() - start_time:.0f}s.")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("1. RECORDS: TOTAL, PER SHARD, PER PLAYER FIELD")
     print("=" * 78)
@@ -214,7 +200,6 @@ def main():
         print(f"  player=0 vs player=1 gap: {gap_pct:.2f}%  [{verdict}]")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("2. OUTCOME BASE RATE")
     print("=" * 78)
@@ -223,7 +208,6 @@ def main():
     print(f"  outcome==1: {outcome_1_count:,} / {total_records:,} = {base_rate:.4f}  [{verdict}]")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("3. PER-GAME OUTCOME CONSISTENCY + COMPLEMENTARITY")
     print("=" * 78)
@@ -261,7 +245,6 @@ def main():
         print(f"      game_id={gid} players_present={players}")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("4. STATES PER GAME")
     print("=" * 78)
@@ -272,7 +255,6 @@ def main():
               f"min={min(lengths)}  max={max(lengths)}")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("5. CurrentPlayer.PlayerID DISTRIBUTION")
     print("=" * 78)
@@ -289,7 +271,6 @@ def main():
         print(f"      shard={os.path.relpath(shard, args.data_dir)} game_id={gid} player_field={pf} state_playerid={cpid}")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("6. PATRON COVERAGE")
     print("=" * 78)
@@ -314,7 +295,6 @@ def main():
             print(f"      {combo} : {combo_counter[combo]}")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("7. OPENING DIVERSITY (first 3 BUY_CARD moves per game, both perspectives merged)")
     print("=" * 78)
@@ -355,7 +335,6 @@ def main():
               f"{distinct}/{len(opening_sequences)} distinct).")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("8. DECK FIELD")
     print("=" * 78)
@@ -369,7 +348,6 @@ def main():
           f"  ({deck_counter.get(9, 0):,} card instances)")
     print()
 
-    # =======================================================================
     print("=" * 78)
     print("9. START-OF-TURN FRACTION")
     print("=" * 78)

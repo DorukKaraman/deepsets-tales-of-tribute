@@ -1,43 +1,22 @@
 """
-Reads every per-task result JSON file tools/benchmark_cluster.py writes and
-prints, per matchup: games completed/failed, clean win rate (bot_a's
-perspective) with a 95% Wilson interval, the swapped/non-swapped breakdown,
-the non-clean games split by CATEGORY and attributed to a side, and mean
-evaluations per turn per agent.
+Summarise the result JSONs tools/benchmark_cluster.py writes. Per matchup: games
+completed and failed, bot_a's clean win rate with a 95% Wilson interval, the
+same split by seat, the non-clean games by category and side, and mean
+evaluations per turn per agent. Takes the --config the run used.
 
-Takes the same --config the run used, so it knows what it is looking for.
+The per-seat split checks for a seat-swap error, which pulls the overall win
+rate towards 50% while the two seats disagree.
 
-THE SWAPPED/NON-SWAPPED BREAKDOWN is not decoration -- it is the check for a
-seat-swap inversion bug (see benchmark_cluster.py's top-of-file docstring). A
-bug there makes the AGGREGATE win rate drift toward 50%, which looks like a
-perfectly plausible result on its own. It does NOT make the two per-seat rates
-agree with each other; a real, correctly-measured skill difference should show
-up in both rows, at least roughly (some divergence is expected and fine --
-first-player advantage is real, which is the whole reason games get swapped --
-but both rows moving in the SAME direction, wide of 50%, is what a healthy
-result looks like. Both rows sitting close to 50% independently, or one at 90%
-and the other at 10%, is what a swap bug looks like).
+Non-clean games are excluded from the win rate and reported by category:
 
-DISQUALIFICATIONS AND TIMEOUTS ARE REPORTED SEPARATELY, per side, because they
-mean opposite things:
+  timeout           The agent ran out of clock. A nonzero count at a short
+                    budget means the engine --timeout margin is too tight; raise
+                    it and re-run rather than report that row.
+  disqualification  The engine rejected a move, the agent threw, or patron
+                    selection failed: a defect.
+  turn_limit        500 turns with no result.
 
-  timeout         The agent ran out of clock. At the short budgets
-                  experiments/configs/time_scaling.json uses, a game lost this
-                  way says the engine --timeout margin is too tight, NOT that
-                  the agent plays worse. If this column is not near zero, the
-                  row's win rate is not a measurement of play and should not be
-                  reported as one -- raise the margin and re-run the row.
-  disqualification  The agent made a move the engine rejected, threw, or failed
-                  patron selection. A real defect, and it does not get excused
-                  by a tight budget.
-  turn_limit      500 turns with no result. Neither agent's fault in
-                  particular; excluded from the win rate as it always was.
-
-All three are excluded from the clean win rate, exactly as before -- the
-difference is that they are now visible individually instead of pooled into
-"other".
-
-Read-only. Does not modify or delete any result file.
+Read-only.
 """
 import argparse
 import glob
@@ -54,8 +33,7 @@ from benchmark_cluster import (  # noqa: E402
 
 
 def wilson_interval(k, n, z=1.959963984540054):
-    """95% Wilson score interval for a binomial proportion k/n. Same formula
-    tools/benchmark_runner.py uses, kept identical on purpose."""
+    """95% Wilson score interval for k/n; the same formula as benchmark_runner.py."""
     if n == 0:
         return None, None
     phat = k / n
@@ -66,9 +44,8 @@ def wilson_interval(k, n, z=1.959963984540054):
 
 
 def load_matchup_results(out_dir, config, matchup):
-    """Result files for one matchup. The directory name is derived through
-    resolve_task/matchup_dir rather than rebuilt here, so a change to the
-    layout cannot silently make this look at the wrong (or an empty) place."""
+    """Result files for one matchup, located through resolve_task and
+    matchup_dir so the layout is defined in one place."""
     probe = resolve_task(config, matchup["task_offset"])
     directory = matchup_dir(out_dir, probe)
     results, malformed = [], 0
@@ -88,9 +65,8 @@ def load_matchup_results(out_dir, config, matchup):
 
 
 def category_of(result):
-    """Result files written before end_reason_detail existed only carry the
-    coarse bucket, which cannot tell a timeout from an illegal move. Those are
-    reported as 'unknown' rather than guessed at."""
+    """A result file without end_reason_detail carries only the coarse bucket,
+    which cannot tell a timeout from an illegal move; it is reported as 'unknown'."""
     category = result.get("category")
     if category:
         return category

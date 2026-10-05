@@ -7,17 +7,14 @@ using System.Threading;
 
 namespace Bots
 {
-    // Samples NeuralEvaluate's inputs/outputs to JSONL so the in-game feature
-    // distribution can be compared against the training/validation distribution
-    // (see experiments/compare_ingame_vs_val.py, experiments/verify_csharp_inference.py).
-    // Opt-in via SOT_DUMP_DIR; zero overhead when unset.
+    // Samples NeuralEvaluate's inputs and outputs to JSONL, to compare the in-game
+    // feature distribution with the training/validation one (see
+    // experiments/compare_ingame_vs_val.py, experiments/verify_csharp_inference.py).
+    // Enabled by SOT_DUMP_DIR; no overhead when unset.
     //
-    // GameRunner runs multiple games concurrently on separate threads within one
-    // process, all sharing this one process's pid (and therefore this dumper's
-    // per-pid output files) -- every counter below is Interlocked and every file
-    // append happens under a lock so concurrent games never corrupt or interleave
-    // a line. "game_id" (passed in by the caller) is what lets rows from
-    // different concurrent games be told apart downstream.
+    // Concurrent games in one GameRunner process share its pid and so these per-pid
+    // files: counters are Interlocked, appends are locked, and the caller's game_id
+    // tells rows from different games apart.
     public static class FeatureDumper
     {
         private static readonly string? DumpDir =
@@ -48,18 +45,15 @@ namespace Bots
             }
         }
 
-        // Called from NeuralEvaluate only, after wp is computed. Returns true iff a
-        // row was written to the (column-mean) evals file, so the caller can keep an
-        // accurate per-game "rows actually dumped" count.
+        // Called from NeuralEvaluate after wp is computed. Returns true iff a row was
+        // written to the evals file, so the caller can count rows dumped per game.
         //
-        // Two independent samplers run on every call:
-        //  - column-mean row -> evals_{pid}.jsonl: ~1-in-2000 of all evals, plus
-        //    ~1-in-500 of terminal evals (terminal states are rarer per turn, so
-        //    they need a higher rate to show up at all).
-        //  - full node-matrix row -> full_{pid}.jsonl: ~1-in-50000 of all evals
-        //    (~30 rows/game). This is the only sample that can reproduce the actual
-        //    forward pass, since the node encoder applies ReLU per-card BEFORE
-        //    pooling: mean(phi(x)) != phi(mean(x)).
+        // Two independent samplers:
+        //  - column-mean row -> evals_{pid}.jsonl: ~1 in 2000 evals, plus ~1 in 500
+        //    terminal evals, which are rarer.
+        //  - full node-matrix row -> full_{pid}.jsonl: ~1 in 50000 evals (~30 per game).
+        //    Only this one can reproduce the forward pass, because the node encoder
+        //    applies ReLU per card before pooling: mean(phi(x)) != phi(mean(x)).
         public static bool MaybeDump(int gameId, int turn, bool isTerminal, float[,] nodeFeatures, float[] globalFeatures, float csharpProb)
         {
             if (!Enabled) return false;
@@ -114,8 +108,8 @@ namespace Bots
             int numNodes = nodeFeatures.GetLength(0);
             int numFeatures = nodeFeatures.GetLength(1);
 
-            // Round-trip precision (G9 for float32) since this file exists specifically
-            // to let verify_csharp_inference.py replay the exact forward pass.
+            // Round-trip precision (G9 for float32), so verify_csharp_inference.py can
+            // replay the exact forward pass.
             const string fmt = "G9";
 
             var sb = new StringBuilder();

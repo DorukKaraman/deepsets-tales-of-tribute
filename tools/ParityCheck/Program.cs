@@ -1,26 +1,16 @@
-// tools/ParityCheck: a dev/CI-only utility for tools/verify_parity.py.
+// tools/ParityCheck: a dev utility for tools/verify_parity.py.
 //
-// Reconstructs real ScriptsOfTribute.Serializers.GameState (and, for the
-// seeded-check mode, SeededGameState) objects from logged state JSON, then
-// runs the REAL Bots.FeatureExtractor.ParseState on them -- not a
-// reimplementation of its formulas. This is possible because FeatureExtractor
-// only ever reads a narrow, well-defined surface (Deck/Cost/Type/HP/Taunt/
-// CommonId on cards; Coins/Power/Prestige/PatronCalls/PlayerID and the card
-// piles on players; PatronStates.All), so the reconstructed objects only need
-// to be correct on that surface -- not full engine-valid game states.
+// Rebuilds ScriptsOfTribute.Serializers.GameState (and SeededGameState) objects
+// from logged state JSON and runs the production Bots.FeatureExtractor.ParseState
+// on them. FeatureExtractor reads only a narrow surface (Deck/Cost/Type/HP/Taunt/
+// CommonId on cards; Coins/Power/Prestige/PatronCalls/PlayerID and the card piles
+// on players; PatronStates.All), so the objects need to be correct only there.
 //
-// Three targeted workarounds were needed, all using ONLY public APIs (no
-// reflection):
-//   - UniqueCard has no simple constructor; built via Card(...).CreateUniqueCopy(),
-//     passing an empty effects array (safe: FeatureExtractor calls
-//     CardDatabase.GetCardEffects(card.CommonId) for effects, never reads
-//     card.Effects itself).
-//   - SerializedAgent's only constructor takes a live Agent, which itself only
-//     needs a UniqueCard; CurrentHp is matched via Agent.Damage/Heal (both
-//     public) rather than set directly.
-//   - PatronStates' only constructor takes List<Patron> (live engine objects);
-//     its .All dictionary is public and mutable, so it's populated directly
-//     from an empty-constructed instance.
+// Built through public APIs only:
+//   - UniqueCard via Card(...).CreateUniqueCopy() with empty effects;
+//     FeatureExtractor takes effects from CardDatabase.GetCardEffects(CommonId).
+//   - SerializedAgent from a live Agent, with CurrentHp set through Agent.Damage/Heal.
+//   - PatronStates from an empty instance, filling its public .All dictionary.
 //
 // Modes:
 //   dump <input.json> <output.json>
@@ -28,24 +18,15 @@
 //     output.json: [{"id": "...", "node_matrix": [[99 floats], ...], "global_vector": [19 floats]}, ...]
 //
 //   seeded-check <input.json>
-//     For each input state, derives BOTH a GameState and, from the same
-//     underlying board, a SeededGameState (via GameState.ToSeededGameState),
-//     runs FeatureExtractor.ParseState on both, and reports whether the
-//     ENEMY_UNSEEN node count/CommonId-multiset match. This is a C#-internal
-//     check (both overloads of the SAME real method) -- no Python involved --
-//     because SeededGameState is exactly what the bot uses inside MCTS, so a
-//     mismatch here would never show up in a GameState-only test.
+//     Derives a GameState and, from it, a SeededGameState (the type the bot sees
+//     inside MCTS), runs ParseState on both, and checks that their ENEMY_UNSEEN
+//     node counts and CommonId multisets match. C# only.
 //
 //   infer <input.json> <onnx_path> <output.jsonl>
-//     For each input state, runs FeatureExtractor.ParseState then the REAL
-//     Bots.ValueNetworkEvaluator.EvaluateBoardState against <onnx_path> --
-//     the actual C# inference path, not the training-side model. Writes one
-//     JSON object per line matching experiments/bots/FeatureDumper.cs's full_*.jsonl
-//     schema exactly (game_id/turn/is_terminal/num_nodes/csharp_prob/global/
-//     nodes), so experiments/verify_csharp_inference.py reads it completely
-//     unmodified -- this replaces that tool's live-game SOT_DUMP_DIR sampler
-//     (1-in-50000 evals, no coverage guarantee) with a deterministic run over
-//     every sampled state, using the same real code path.
+//     Runs ParseState and then Bots.ValueNetworkEvaluator.EvaluateBoardState
+//     against <onnx_path>, writing one JSON object per line in
+//     experiments/bots/FeatureDumper.cs's full_*.jsonl schema, so
+//     experiments/verify_csharp_inference.py reads it unmodified.
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -152,12 +133,8 @@ int RunInfer(string inputPath, string onnxPath, string outputPath)
                 }
             }
 
-            // Matches experiments/bots/FeatureDumper.cs's full_*.jsonl schema exactly so
-            // experiments/verify_csharp_inference.py reads this file unmodified.
-            // game_id/turn/is_terminal are placeholders (only used for
-            // display in that tool's failure diagnostics, never for the
-            // actual comparison) since this harness has no live-game turn
-            // context -- count doubles as a stable, distinct game_id.
+            // Same schema as FeatureDumper.cs's full_*.jsonl. game_id/turn/is_terminal
+            // are display-only placeholders there; count serves as a distinct game_id.
             var record = new InferRecord(count, 0, false, numNodes, csharpProb, globalFeatures, nodesJagged);
             writer.WriteLine(JsonSerializer.Serialize(record));
             count++;
@@ -181,19 +158,15 @@ int RunSeededCheck(string inputPath)
         GameState gs = ReconstructGameState(stateEl);
         SeededGameState sgs = gs.ToSeededGameState(12345UL);
 
-        // Compare the actual card multisets each overload's ENEMY_UNSEEN loop
-        // reads from, not a re-derivation from the output node matrix (the
-        // feature vector doesn't carry CommonId directly once effects are
-        // looked up, and comparing raw floats would be needlessly fragile).
+        // Compare the card multisets each overload's ENEMY_UNSEEN loop reads, not the
+        // output floats, which no longer carry CommonId.
         List<CardId> gsUnseen = gs.EnemyPlayer.HandAndDraw.Select(c => c.CommonId).OrderBy(x => x).ToList();
         List<CardId> sgsUnseen = sgs.EnemyPlayer.Hand.Concat(sgs.EnemyPlayer.DrawPile)
             .Select(c => c.CommonId).OrderBy(x => x).ToList();
 
-        // Also confirm FeatureExtractor's own node COUNT at LOC_ENEMY_UNSEEN
-        // agrees with that multiset size for both overloads -- this is what
-        // would actually catch a "loop over DrawPile but forgot Hand" bug in
-        // FeatureExtractor itself (Bots/src/DeepSetsCore.cs), as opposed to a
-        // bug in this harness's reconstruction.
+        // Also check FeatureExtractor's node count at LOC_ENEMY_UNSEEN against that
+        // multiset size, which catches a bug in FeatureExtractor itself (such as
+        // skipping Hand) rather than in this reconstruction.
         var (gsNodes, _, _) = FeatureExtractor.ParseState(gs);
         var (sgsNodes, _, _) = FeatureExtractor.ParseState(sgs);
         int gsUnseenNodeCount = CountAtLocation(gsNodes, locSlot: 8);
@@ -241,18 +214,11 @@ GameState ReconstructGameState(JsonElement stateEl)
 
     SerializedPlayer currentPlayer = ParsePlayerFull(cpEl, ParseCardList(cpEl, "Hand"), ParseCardList(cpEl, "DrawPile"));
 
-    // EnemyPlayer in the logged JSON is a FairSerializedEnemyPlayer, which
-    // merges Hand+DrawPile into "HandAndDraw". Reconstructing SerializedPlayer
-    // needs separate Hand/DrawPile lists, but the split point is unrecoverable
-    // (that's exactly what FairSerializedEnemyPlayer's serialization threw
-    // away). This doesn't affect the "dump" mode's correctness --
-    // FairSerializedEnemyPlayer.HandAndDraw recomputes as
-    // DrawPile.Concat(Hand).OrderBy(CommonId) regardless of how the two are
-    // split. But an arbitrary non-degenerate split (alternating cards between
-    // the two piles, rather than dumping everything into one) matters for
-    // "seeded-check": if everything landed in DrawPile, Hand would stay
-    // empty and a FeatureExtractor bug that forgot to iterate one of the
-    // two piles in the SeededGameState overload would go undetected.
+    // The logged EnemyPlayer is a FairSerializedEnemyPlayer, which merges Hand and
+    // DrawPile into HandAndDraw; the split is unrecoverable. "dump" is unaffected,
+    // since HandAndDraw is recomputed from both piles. "seeded-check" alternates cards
+    // between the two piles so that neither is empty and a FeatureExtractor bug that
+    // skips one pile in the SeededGameState overload still shows.
     List<UniqueCard> enemyHandAndDraw = ParseCardList(epEl, "HandAndDraw");
     var enemyHand = new List<UniqueCard>();
     var enemyDraw = new List<UniqueCard>();
@@ -346,7 +312,7 @@ record DumpResult(
     [property: JsonPropertyName("node_matrix")] float[][] NodeMatrix,
     [property: JsonPropertyName("global_vector")] float[] GlobalVector);
 
-// Field names/order match experiments/bots/FeatureDumper.cs's full_*.jsonl schema exactly.
+// Field names and order follow FeatureDumper.cs's full_*.jsonl schema.
 record InferRecord(
     [property: JsonPropertyName("game_id")] int GameId,
     [property: JsonPropertyName("turn")] int Turn,

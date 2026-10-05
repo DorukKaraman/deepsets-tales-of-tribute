@@ -10,51 +10,38 @@ using ScriptsOfTribute.Board.Cards;
 namespace Bots;
 
 
-// DeepSetsBotExp: THE PAPER'S EXPERIMENT AGENT. Not a candidate agent, not a
-// tournament submission -- see experiments/README.md.
+// DeepSetsBotExp: the experiment agent used for the paper, not a submission; see
+// experiments/README.md.
 //
-// It is a verbatim copy of Bots/src/DeepSetsBlendBot.cs (the 1st-place
-// tournament submission) with three environment variables bolted on, and
-// NOTHING else changed. The submissions themselves
-// (Bots/src/DeepSetsBot.cs, Bots/src/DeepSetsBlendBot.cs,
-// Bots/src/DeepSetsCore.cs) must stay byte-identical, which is exactly why
-// this copy exists: one build, one class, every experimental configuration.
+// A copy of Bots/src/DeepSetsBlendBot.cs with three environment variables added.
+// The submitted bots must stay byte-identical, so every experimental
+// configuration runs through this one class.
 //
-//   SOT_MODEL_PATH        ONNX model to load. Unset -> the normal resolution
-//                         DeepSetsBlendBot already does (AppContext.BaseDirectory,
-//                         then CWD, then ../Bots).
-//   SOT_ALPHA0            Initial blend coefficient, i.e. ALPHA_START.
-//                         Default 0.7 (DeepSetsBlendBot's own value).
-//                         0.0 makes ComputeAlpha return 0.0 for every prestige
-//                         clock, so Evaluate() takes its pure-network short
-//                         circuit on every leaf -- that is, alpha0=0 IS
-//                         DeepSetsBot. One class covers both agents.
-//   SOT_TIME_SCALE        Multiplies BOTH time constants that define the
-//                         per-turn search economy: the 9.8s TurnTimeout and
-//                         the 0.65s per-move cap. Default 1.0. Scaling only
-//                         one of them does not scale search volume
-//                         proportionally -- see scripts/sakkirina_half.patch,
-//                         which measured exactly that mistake (73% of stock
-//                         instead of the intended 45%).
+//   SOT_MODEL_PATH        ONNX model to load. Unset: DeepSetsBlendBot's own
+//                         resolution (AppContext.BaseDirectory, then CWD, then
+//                         ../Bots).
+//   SOT_ALPHA0            Initial blend coefficient (ALPHA_START). Default 0.7.
+//                         At 0.0 ComputeAlpha is 0 at every prestige clock, so
+//                         Evaluate() always takes its network-only path and the
+//                         agent is DeepSetsBot.
+//   SOT_TIME_SCALE        Multiplies both the 9.8s TurnTimeout and the 0.65s
+//                         per-move cap. Default 1.0. Scaling only one does not
+//                         scale search volume proportionally; see
+//                         scripts/sakkirina_half.patch (73% of stock instead of
+//                         the intended 45%).
 //
-// WITH ALL THREE UNSET THIS PLAYS IDENTICALLY TO DeepSetsBlendBot. The
-// defaults are the submission's own constants, the env reads happen once in
-// PregamePrepare, and no other code path differs. (Search here is wall-clock
-// budgeted, so "identically" means the same decision rule, not necessarily
-// the same move sequence on a rerun -- see the divergence note in
-// experiments/README.md.)
+// With all three unset this uses DeepSetsBlendBot's decision rule: the defaults
+// are its constants, read once in PregamePrepare. The search is wall-clock
+// budgeted, so reruns need not repeat the same moves; see experiments/README.md.
 //
-// It also logs evaluations per turn (see _turnCount / GameEnd below), which is
-// what makes equal-effort matching measurable: tools/benchmark_cluster.py's
-// --calibrate mode parses those lines to pick the SOT_TIME_SCALE at which this
-// agent and the baseline evaluate the same number of positions per turn.
+// It also logs evaluations per turn (_turnCount, GameEnd), which
+// tools/benchmark_cluster.py --calibrate uses to pick the SOT_TIME_SCALE at which
+// this agent and the baseline evaluate the same number of positions per turn.
 //
-// Everything below this comment, other than the blocks explicitly marked
-// "EXPERIMENT HOOK", is DeepSetsBlendBot.cs verbatim. Do not restructure the
-// search here -- if it needs fixing, it needs fixing in the submission first,
-// and the submission is frozen.
+// Apart from the blocks marked "EXPERIMENT HOOK", everything below is
+// DeepSetsBlendBot.cs unchanged.
 //
-// ---- DeepSetsBlendBot's own header, kept verbatim ----
+// ---- DeepSetsBlendBot's own header ----
 //
 // DeepSetsBlendBot: the same DeepSets-evaluated search as DeepSetsBot, with
 // one addition: Evaluate() blends the hand-written heuristic and the
@@ -78,17 +65,15 @@ public class DeepSetsBotExp : AI
     // clock reaches ALPHA_ZERO_ABOVE, and stays 0.0 (pure neural) beyond that.
     // Tune freely; these are the only three numbers that matter here.
     //
-    // EXPERIMENT HOOK: ALPHA_START is the DEFAULT for _alpha0 below, not the
-    // value used. SOT_ALPHA0 overrides it. The other two are unchanged.
+    // EXPERIMENT HOOK: ALPHA_START is the default for _alpha0 below, which
+    // SOT_ALPHA0 overrides.
     const double ALPHA_START = 0.7;
     const double ALPHA_FULL_BELOW = 0.10;
     const double ALPHA_ZERO_ABOVE = 0.50;
 
-    // EXPERIMENT HOOK: the two time constants SOT_TIME_SCALE multiplies. In
-    // DeepSetsBlendBot these are the literals 9.8 (the TurnTimeout field
-    // initializer) and 0.65 (inline in Play()); named here so the scale is
-    // applied to both, from the same base, every game -- never compounding
-    // across games when GameRunner reuses one bot instance for --runs N.
+    // EXPERIMENT HOOK: the two time constants SOT_TIME_SCALE multiplies; literals
+    // in DeepSetsBlendBot. Scaled from these bases each game, so the scale does not
+    // compound when GameRunner reuses one bot instance across --runs N.
     const double BASE_TURN_TIMEOUT_SECONDS = 9.8;
     const double BASE_PER_MOVE_CAP_SECONDS = 0.65;
 
@@ -291,10 +276,8 @@ public class DeepSetsBotExp : AI
     PlayerEnum myPlayerID;
     SeededRandom rng;
 
-    // EXPERIMENT HOOK: resolved once per game in PregamePrepare from the
-    // environment, held fixed for the whole game. Defaults are exactly
-    // DeepSetsBlendBot's own values, so an unset environment is the
-    // submission's behaviour.
+    // EXPERIMENT HOOK: resolved from the environment once per game in
+    // PregamePrepare. The defaults are DeepSetsBlendBot's values.
     double _alpha0 = ALPHA_START;
     double _timeScale = 1.0;
     double _perMoveCapSeconds = BASE_PER_MOVE_CAP_SECONDS;
@@ -329,22 +312,14 @@ public class DeepSetsBotExp : AI
     private readonly System.Diagnostics.Stopwatch _evalNetworkStopwatch = new System.Diagnostics.Stopwatch();
     private readonly System.Diagnostics.Stopwatch _gameWallClock = new System.Diagnostics.Stopwatch();
 
-    // EXPERIMENT HOOK: evaluations per turn, the quantity equal-effort
-    // matching is defined on.
+    // EXPERIMENT HOOK: evaluations per turn, the quantity equal-effort matching
+    // uses. Evals per second depends on opponent thinking time and evals per game on
+    // game length, and both change with the time budget under study. Both agents in
+    // a game play the same number of turns (+/-1), so per turn is comparable.
     //
-    // Per TURN, not per second and not per game. Evals/sec is swamped by
-    // opponent thinking time and evals/game by game length, both of which
-    // change when the time budget changes -- which is precisely the variable
-    // under study, so neither is usable as the matching target.
-    // scripts/sakkirina_half.patch hit this and switched to per-thinking-second
-    // for the same reason; per-turn is the version that is directly comparable
-    // between two agents in the same game, since both play the same number of
-    // turns (+/-1).
-    //
-    // _totalThinkingSeconds accumulates ONLY the search loop in Play()
-    // (s.Elapsed per call), excluding opponent turns, rule-based/instant moves
-    // and patron selection, so evalsPerThinkingSec is a clean throughput
-    // figure alongside it.
+    // _totalThinkingSeconds covers only the search loop in Play(), excluding opponent
+    // turns, rule-based moves and patron selection, so evalsPerThinkingSec measures
+    // throughput.
     private long _turnCount = 0;
     private long _evalCallsAtTurnStart = 0;
     private double _totalThinkingSeconds = 0.0;
@@ -488,15 +463,10 @@ public class DeepSetsBotExp : AI
     // clock <= ALPHA_FULL_BELOW -> alpha0; clock >= ALPHA_ZERO_ABOVE ->
     // 0.0; linear interpolation in between. See the ALPHA_* consts above.
     //
-    // EXPERIMENT HOOK: DeepSetsBlendBot reads the constant ALPHA_START here;
-    // this takes alpha0 as a parameter so SOT_ALPHA0 can drive it. Called with
-    // _alpha0, which defaults to ALPHA_START -- so an unset SOT_ALPHA0 is
-    // arithmetically the same function. At alpha0 = 0.0 every branch returns
-    // 0.0 (the first returns 0.0, the second returns 0.0, and the third
-    // returns 0.0 * anything), which is what makes this class cover
-    // DeepSetsBot as well: Evaluate()'s `_currentAlpha <= 0.0` short circuit
-    // then fires on every leaf, for every turn, and the heuristic is never
-    // called.
+    // EXPERIMENT HOOK: takes alpha0 as a parameter instead of reading ALPHA_START,
+    // and is called with _alpha0, which defaults to ALPHA_START. At alpha0 = 0.0
+    // every branch returns 0.0, so Evaluate()'s `_currentAlpha <= 0.0` short circuit
+    // fires on every leaf and the agent is DeepSetsBot.
     static double ComputeAlpha(double prestigeClock, double alpha0)
     {
         if (prestigeClock <= ALPHA_FULL_BELOW) return alpha0;
@@ -1063,15 +1033,10 @@ public class DeepSetsBotExp : AI
             gameState.EnemyPlayer.Prestige);
     }
 
-    // EXPERIMENT HOOK: reads a double from the environment, clamped to a valid
-    // range. An unset variable is the default, silently. A SET but unparseable
-    // or out-of-range variable is NOT silently the default -- it is logged as
-    // an explicit REJECTED line, because someone who set SOT_ALPHA0=0,5 (comma,
-    // as half of Europe's locales write it) and got 0.7 back would otherwise
-    // have a full experimental condition that quietly measured the wrong thing.
-    //
-    // InvariantCulture on purpose, for that exact reason: the value must parse
-    // the same way on a German-locale login node as it does here.
+    // EXPERIMENT HOOK: reads a double from the environment within a valid range.
+    // Unset gives the default. A set value that does not parse or is out of range
+    // also gives the default but logs a REJECTED line, so SOT_ALPHA0=0,5 does not
+    // pass unnoticed. InvariantCulture so parsing does not depend on the node's locale.
     static double ReadDoubleEnv(string name, double fallback, double min, double max, out string note)
     {
         string? raw = Environment.GetEnvironmentVariable(name);
@@ -1101,14 +1066,9 @@ public class DeepSetsBotExp : AI
     // EvaluateHeuristic (not a silent 0.5) if the model fails to load, since
     // a perfectly good evaluator already exists in this same file.
     //
-    // EXPERIMENT HOOK: also resolves SOT_ALPHA0, SOT_TIME_SCALE and
-    // SOT_MODEL_PATH, once per game, and logs every resolved value.
-    //
-    // This is also where the per-game counters reset. GameRunner reuses one
-    // bot instance across --runs N, so without this the evals/turn figure
-    // would be a running total over every game the process has played, not
-    // this game's. (The harnesses all use --runs 1, which would mask it; that
-    // is not a reason to leave it wrong.)
+    // EXPERIMENT HOOK: also resolves SOT_ALPHA0, SOT_TIME_SCALE and SOT_MODEL_PATH
+    // once per game and logs each value, and resets the per-game counters, since
+    // GameRunner reuses one bot instance across --runs N.
     public override void PregamePrepare()
     {
         _gameWallClock.Restart();
@@ -1122,15 +1082,14 @@ public class DeepSetsBotExp : AI
         _totalThinkingSeconds = 0.0;
         _evalNetworkStopwatch.Reset();
 
-        // alpha0 in [0, 1]: 0 is pure network (== DeepSetsBot), 1 is pure
-        // heuristic for the whole blend window. Anything outside that is not a
-        // convex blend and is rejected rather than clamped.
+        // alpha0 in [0, 1]: 0 is pure network (DeepSetsBot), 1 pure heuristic across
+        // the blend window. Values outside are not a convex blend and are rejected, not
+        // clamped.
         _alpha0 = ReadDoubleEnv("SOT_ALPHA0", ALPHA_START, 0.0, 1.0, out string alphaNote);
         _currentAlpha = _alpha0;
 
-        // Upper bound 1000 rather than +inf: a scale that large means a typo,
-        // and the engine's own per-turn timeout would end the game as a
-        // TURN_TIMEOUT long before the bot's own cap mattered.
+        // Upper bound 1000: a larger scale is a typo, and the engine's per-turn timeout
+        // would end the game long before the bot's cap mattered.
         _timeScale = ReadDoubleEnv("SOT_TIME_SCALE", 1.0, 1e-4, 1000.0, out string scaleNote);
         TurnTimeout = TimeSpan.FromSeconds(BASE_TURN_TIMEOUT_SECONDS * _timeScale);
         _perMoveCapSeconds = BASE_PER_MOVE_CAP_SECONDS * _timeScale;
@@ -1138,14 +1097,10 @@ public class DeepSetsBotExp : AI
         string modelName = "DeepSetsValueNetwork.onnx";
         string modelPath = modelName;
 
-        // SOT_MODEL_PATH wins outright when it points at a file that exists.
-        // If it is set but missing, this falls back to the normal resolution
-        // AND says so at the top of the log -- but the real guard is upstream:
-        // tools/benchmark_cluster.py refuses to launch a task whose
-        // SOT_MODEL_PATH does not exist or whose sha256 is not in the config's
-        // allowed list. It has to be upstream, because BotLog writes nothing
-        // at all unless SOT_LOG=1, so a bot-side log is not something a
-        // 400-game array run would ever surface on its own.
+        // SOT_MODEL_PATH wins when it names an existing file. If it is set but missing,
+        // this falls back to the normal resolution and logs it. The real guard is
+        // tools/benchmark_cluster.py, which refuses a task whose SOT_MODEL_PATH is missing
+        // or not on the config's allowed list, since BotLog writes nothing unless SOT_LOG=1.
         _modelPathOverride = Environment.GetEnvironmentVariable("SOT_MODEL_PATH");
         string modelNote;
         if (!string.IsNullOrWhiteSpace(_modelPathOverride))
@@ -1164,10 +1119,8 @@ public class DeepSetsBotExp : AI
         }
         else
         {
-            // Null it rather than leaving an empty/whitespace string: the
-            // `is null` test below is what selects the normal resolution, and
-            // SOT_MODEL_PATH="" would otherwise skip it and leave modelPath as
-            // the bare relative filename.
+            // An empty or whitespace value becomes null, so the `is null` test below selects
+            // the normal resolution instead of using the bare relative filename.
             _modelPathOverride = null;
             modelNote = "SOT_MODEL_PATH=<unset> -> normal resolution";
         }
@@ -1249,13 +1202,10 @@ public class DeepSetsBotExp : AI
             usedTimeInTurn = TimeSpan.FromSeconds(0);
             rootNode = null;
 
-            // EXPERIMENT HOOK: close out the turn that just ended before
-            // starting the new one. Emitted here rather than only at GameEnd so
-            // the per-turn series survives a game that ends in a timeout or an
-            // exception -- which, at the short time budgets
-            // experiments/configs/time_scaling.json runs, is not a rare case.
-            // The final turn has no successor to close it, so GameEnd emits
-            // that one.
+            // EXPERIMENT HOOK: emit the turn that just ended. Done here, not only at
+            // GameEnd, so the per-turn series survives a game that ends in a timeout or
+            // exception, common at the short budgets of experiments/configs/time_scaling.json.
+            // GameEnd emits the final turn.
             if (_turnCount > 0)
             {
                 BotLog.Write($"DeepSetsBotExp.Turn: turn={_turnCount}, " +
@@ -1297,11 +1247,8 @@ public class DeepSetsBotExp : AI
         }
 
         // thinking...
-        // EXPERIMENT HOOK: _perMoveCapSeconds is BASE_PER_MOVE_CAP_SECONDS
-        // (0.65, DeepSetsBlendBot's literal) times SOT_TIME_SCALE. TurnTimeout
-        // on the other side of the Min is scaled by the same factor in
-        // PregamePrepare -- both, together, or search volume does not scale
-        // proportionally.
+        // EXPERIMENT HOOK: _perMoveCapSeconds is BASE_PER_MOVE_CAP_SECONDS (0.65) times
+        // SOT_TIME_SCALE; TurnTimeout is scaled by the same factor in PregamePrepare.
         TimeSpan timeForMoveComputation = TimeSpan.FromSeconds(Math.Min(_perMoveCapSeconds, (TurnTimeout - usedTimeInTurn).TotalSeconds / 4));
         Stopwatch s = new Stopwatch();
         s.Start();
@@ -1348,19 +1295,16 @@ public class DeepSetsBotExp : AI
     {
         _gameWallClock.Stop();
 
-        // EXPERIMENT HOOK: the last turn has no successor Play() to close it
-        // (see the turn-start block above), so it is emitted here.
+        // EXPERIMENT HOOK: the last turn has no later Play() to emit it.
         if (_turnCount > 0)
         {
             BotLog.Write($"DeepSetsBotExp.Turn: turn={_turnCount}, " +
                          $"evals={_totalEvalCalls - _evalCallsAtTurnStart}, cumulativeEvals={_totalEvalCalls}");
         }
 
-        // EXPERIMENT HOOK: the line tools/benchmark_cluster.py parses, for
-        // every game, to report evaluations per turn per matchup and to pick
-        // the equal-effort SOT_TIME_SCALE. Keep the key=value shape and the
-        // "DeepSetsBotExp.EvalsPerTurn:" prefix if you touch it --
-        // EVALS_PER_TURN_PATTERN there matches on exactly that.
+        // EXPERIMENT HOOK: parsed by tools/benchmark_cluster.py (EVALS_PER_TURN_PATTERN)
+        // for evaluations per turn and equal-effort calibration. Keep the
+        // "DeepSetsBotExp.EvalsPerTurn:" prefix and the key=value shape.
         double meanEvalsPerTurn = _turnCount > 0 ? (double)_totalEvalCalls / _turnCount : 0.0;
         double evalsPerThinkingSec = _totalThinkingSeconds > 0 ? _totalEvalCalls / _totalThinkingSeconds : 0.0;
         BotLog.Write($"DeepSetsBotExp.EvalsPerTurn: totalEvalCalls={_totalEvalCalls}, turns={_turnCount}, " +

@@ -2,26 +2,17 @@
 # Cluster-scale training-data generation through GameRunner's
 # --log-training-data, sharded across --jobs OS processes.
 #
-# Self-play by default (--bot, default SakkirinaGenNeural -- our current best
-# agent, 68% vs SakkirinaSolo), which is what the shipped model was trained on.
-# --bot-a/--bot-b generate from two DIFFERENT agents instead, which is how a
-# HELD-OUT evaluation set gets made: neither shipped model was trained on games
-# between DeepSetsBotExp and SakkirinaSolo, so that pairing produces genuinely
-# unseen data in a way a fresh self-play run from the same generator does not.
-# Seats alternate across jobs in that mode -- see tools/generate_data.py.
+# Self-play by default (--bot, default SakkirinaGenNeural). --bot-a/--bot-b
+# generate from two different agents, with seats alternating across jobs; see
+# tools/generate_data.py.
 #
-# DIRECT BINARY INVOCATION ONLY. At thousands of games, `dotnet run`'s MSBuild
-# up-to-date check on every invocation is unacceptable overhead -- this script
-# builds once, then every worker process invokes the built GameRunner binary
-# directly (see tools/generate_data.py).
+# Builds once; every worker then invokes the GameRunner binary directly, avoiding
+# `dotnet run`'s MSBuild up-to-date check on each invocation.
 #
-# RESUMABLE. Each worker (one process running --runs N) writes a JSON marker
-# on successful completion. Relaunching this script with the SAME --games
-# --jobs --seed-base --out-dir skips every worker whose marker matches the
-# plan and only (re)runs the rest -- a cluster job killed at hour 4 does not
-# lose the first 4 hours of shards. Relaunching with DIFFERENT arguments
-# reshuffles job boundaries and will re-run everything; markers are only
-# trusted when they match the current plan exactly.
+# Resumable: each worker (one process running --runs N) writes a marker on
+# success. Relaunching with the same --games --jobs --seed-base --out-dir skips
+# workers whose marker matches the plan. Different arguments change the job
+# boundaries, so everything reruns.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +20,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GAME_RUNNER_DIR="$REPO_ROOT/GameRunner"
 BOTS_DIR="$REPO_ROOT/Bots"
 
-# Hardcoded, not a flag, same reasoning as tools/benchmark.sh: this exists to
-# produce training data worth trusting, and a Debug build silently disables
-# JIT optimizations for the whole wall-clock-budgeted search.
+# Always Release: a Debug build disables JIT optimizations under a wall-clock
+# search budget.
 CONFIGURATION="Release"
 BOTS_TFM="netstandard2.1"
 BINARY="$GAME_RUNNER_DIR/bin/$CONFIGURATION/net8.0/GameRunner"
@@ -168,9 +158,8 @@ if [ -n "$TASK_ID" ]; then
   OUT_DIR="$OUT_DIR/task_$(printf '%02d' "$TASK_ID")"
   SEED_BASE=$((SEED_BASE + TASK_ID * 1000000))
   JOBS=1
-  # Every array task runs a single job numbered 0, so without this every task
-  # would put the same bot in seat P1 and the seat alternation in
-  # tools/generate_data.py would never actually happen. Ignored for self-play.
+  # Every array task runs one job numbered 0; offsetting by the task id keeps
+  # seats alternating across tasks. Ignored for self-play.
   SWAP_OFFSET="$TASK_ID"
   echo "=== SLURM array task ==="
   echo "Task ID        : $TASK_ID"
@@ -230,12 +219,8 @@ RUNNER_OUT_DIR="$(dirname "$BINARY")"
 echo "Using binary: $BINARY"
 echo
 
-# --- Pre-flight guard: abort if the Bots.dll or onnx model the runner will
-# actually load don't match the current $CONFIGURATION source artifacts.
-# Unconditional even with --skip-build (in fact ESPECIALLY with --skip-build):
-# this is the exact failure mode that would silently corrupt a multi-hour/
-# multi-task cluster generation run -- see tools/benchmark.sh for the same
-# checks with the same reasoning.
+# Pre-flight guard: abort if the Bots.dll or onnx model the runner will load
+# differs from the current $CONFIGURATION artifacts. Runs even with --skip-build.
 EXPECTED_BOTS_DLL="$BOTS_DIR/bin/$CONFIGURATION/$BOTS_TFM/Bots.dll"
 ACTUAL_BOTS_DLL="$RUNNER_OUT_DIR/Bots/Bots.dll"
 
@@ -292,15 +277,9 @@ echo "Verified: onnx model in GameRunner's output matches models/DeepSetsValueNe
 echo "  onnx     : $ONNX_DST (sha256=$ONNX_DST_SHA)"
 echo
 
-# Optional pin, on top of the unconditional existence/consistency check
-# above: SakkirinaGen needed no model at all, but SakkirinaGenNeural (and any
-# future ONNX-backed bot passed via --bot) does -- if it fails to load, the
-# bot silently falls back to a heuristic evaluator and keeps playing, so a
-# multi-thousand-game cluster run would generate nothing but quietly
-# wrong data with no error anywhere. This lets a cluster invocation pin the
-# exact model it was validated against, so a model swapped in later (even a
-# legitimately newer one) can't silently change what an in-flight or
-# about-to-launch run generates.
+# Optional pin of the exact model. An ONNX-backed bot that fails to load its
+# model falls back to a heuristic evaluator without any error, so this keeps a
+# swapped-in model from changing what a run generates.
 if [ -n "$EXPECT_ONNX_SHA256" ] && [ "$ONNX_DST_SHA" != "$EXPECT_ONNX_SHA256" ]; then
   echo "ERROR: onnx model sha256 does not match --expect-onnx-sha256." >&2
   echo "  expected: $EXPECT_ONNX_SHA256" >&2

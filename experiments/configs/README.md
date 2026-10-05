@@ -12,7 +12,7 @@ sequence; see *Running one* below.
 | [`time_scaling.json`](time_scaling.json) | Does the advantage grow, shrink or hold as the per-turn budget moves from 2 s to 30 s? | 5 × 400 | 2000 |
 | [`equal_effort.json`](equal_effort.json) | Is the network better, or is the heuristic agent just searching more? Treatment sped up; landed at 0.88 of the baseline's effort (43,139 vs 49,131 evals/turn). | 1 × 400 | 400 |
 | [`equal_effort_baseline_slowed.json`](equal_effort_baseline_slowed.json) | The same question, baseline slowed down instead. Cheaper; matched to within 3 % (6,433 vs 6,627 evals/turn). | 1 × 400 | 400 |
-| [`seed_benchmark.json`](seed_benchmark.json) | How much of the win rate is the training seed? Five per-seed models plus the shipped one, same games. **Needs two path substitutions first.** | 6 × 400 | 2400 |
+| [`seed_benchmark.json`](seed_benchmark.json) | How much of the win rate is the training seed? Five per-seed models plus the shipped one, 400 games each on one seed_base. **Needs two path substitutions first.** | 6 × 400 | 2400 |
 | [`ablation_benchmark.json`](ablation_benchmark.json) | Does the DeepSets structure win *games*, or only validation loss? A DeepSets control and three flat-MLP arms, including a permutation-invariant one (REPRODUCE.md §8). **Needs one path substitution first.** | 4 × 400 | 1600 |
 | [`legacy_paper_benchmark.json`](legacy_paper_benchmark.json) | The original 10-matchup benchmark, reproduced exactly, plus the 2 cross matchups appended at the end. | 12 × 400 | 4800 |
 

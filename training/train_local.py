@@ -22,32 +22,23 @@ PRESTIGE_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, float("inf"))]
 
 
 def worker_init_fn(worker_id):
-    """Seeds each DataLoader worker from torch's own per-worker seed.
+    """Seed a DataLoader worker's `random` and numpy from its torch seed.
 
-    This is what makes --seed reach the SHUFFLE BUFFER: training/stream_dataset.py
-    shuffles shard order and picks buffer eviction slots with the `random`
-    module, inside the worker process, where the main process's random.seed()
-    does not apply. torch.initial_seed() here is worker-specific and is itself
-    derived from the global torch seed, so seeding from it gives every worker a
-    distinct but reproducible stream."""
+    stream_dataset shuffles shards and evicts buffer slots with `random` inside
+    the worker, where the main process's random.seed() does not reach. The
+    per-worker torch seed derives from the global one, so each worker gets a
+    distinct, reproducible stream."""
     seed = torch.initial_seed() % 2**32
     random.seed(seed)
     np.random.seed(seed)
 
 
 def seed_everything(seed):
-    """Seeds all four sources of randomness this pipeline actually uses:
-    python's `random` (stream_dataset's shard shuffle and shuffle buffer in the
-    num_workers=0 case), numpy, torch (weight init, dropout, and the base seed
-    DataLoader derives each worker's seed from -- see worker_init_fn), and
-    torch's CUDA generators if any.
+    """Seed python's random, numpy and torch (CPU and CUDA).
 
-    NOT bit-exact reproducibility. Identical seeds give identical weight
-    initialisation and identical data order, which is what a seed is for here.
-    Exact loss curves additionally depend on thread count, BLAS version and
-    hardware, none of which a seed controls -- see scripts/setup_python_env.sh
-    for the pinned versions, and REPRODUCE.md for what does and does not
-    reproduce."""
+    The same seed gives the same initialisation and data order. Loss curves are
+    not bit-exact across machines: thread count, BLAS version and hardware also
+    matter."""
     random.seed(seed)
     np.random.seed(seed % 2**32)
     torch.manual_seed(seed)
@@ -137,15 +128,11 @@ def run_validation(model, val_loader, criterion, device):
 def train_model(train_dir, val_dir, epochs, batch_size, lr, num_workers, out_dir, seed,
                 model_factory=None, checkpoint_prefix="deepsets_value_network",
                 run_config_extra=None):
-    """model_factory, checkpoint_prefix and run_config_extra exist so that the
-    flat-MLP ablation (training/train_flat.py) runs through THIS loop rather
-    than a copy of it -- same optimizer, scheduler, metrics, checkpointing and
-    seeding, so the two arms differ in the model and nothing else.
+    """Train one model, writing checkpoints and metrics to out_dir.
 
-    Left unset, every one of them reproduces the original behaviour exactly,
-    including the point in the RNG stream at which the model is constructed:
-    seed_everything runs first, then the factory, so weight initialisation
-    consumes the torch RNG in the same order it always did."""
+    model_factory, checkpoint_prefix and run_config_extra let train_flat.py
+    reuse this loop. The factory runs after seeding, so weight initialisation
+    draws from the seeded RNG."""
     print("Starting training run")
     os.makedirs(out_dir, exist_ok=True)
 

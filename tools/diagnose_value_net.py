@@ -1,13 +1,11 @@
 """
 Read-only diagnostic for the Sakkirina value network.
 
-Streams real validation samples, runs them through both the exported ONNX
-model and the PyTorch checkpoint it's supposed to match, and reports
-agreement, calibration, and accuracy stats (overall and bucketed by the
-prestige clock). Saves two histogram PNGs. Does not modify any existing
-file and does not train anything.
+Runs validation samples through both the exported ONNX model and its PyTorch
+checkpoint and reports their agreement, plus calibration and accuracy overall
+and by prestige clock. Saves two histogram PNGs.
 
-Requirements (beyond what training/ already needs -- torch, torch_geometric):
+Needs, beyond training/'s requirements:
     pip install onnxruntime scikit-learn matplotlib
 """
 import argparse
@@ -39,10 +37,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Order matches StateParser.extract_global_context exactly (indices 0-18).
-# TREASURY excluded from the patron favour block -- it has no favour
-# mechanic (confirmed empirically: NO_PLAYER_SELECTED in 1753/1753 sampled
-# records), unlike the node vector's Deck one-hot, which still includes it.
+# Same order as StateParser.extract_global_context (indices 0-18). TREASURY has
+# no favour mechanic, so it is absent from the favour block but present in the
+# node vector's Deck one-hot.
 GLOBAL_FEATURE_NAMES = [
     "CurrentPlayer.Coins",
     "CurrentPlayer.Power",
@@ -65,21 +62,15 @@ GLOBAL_FEATURE_NAMES = [
     "EnemyAgentCount",
 ]
 
-# Global feature index 13 is the prestige clock (see
-# StateParser.extract_global_context / FeatureExtractor.EncodeGlobalContext).
-# A named constant, not a bare literal, specifically because this index
-# already drifted once: it moved 16 -> 13 when TREASURY was dropped from the
-# patron favour block, and this file's own bucketing logic kept reading
-# column 16 (silently the wrong column, not a crash) until a full pipeline
-# dry run caught the mismatched bucket counts against train_local.py's own
-# (correctly-indexed) bucketing on the same data.
+# Global feature index 13 is the prestige clock (StateParser.extract_global_context /
+# FeatureExtractor.EncodeGlobalContext). Named so it changes with the schema.
 PRESTIGE_CLOCK_GLOBAL_INDEX = 13
 PRESTIGE_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, float("inf"))]
 AGREEMENT_THRESHOLD = 1e-4
 PERCENTILES = (1, 5, 25, 50, 75, 95, 99)
 
-# (lo, hi, label) -- half-open [lo, hi), used to localize the ONNX export bug
-# by node count (the dummy trace shape in export_to_onnx.py is 15 nodes).
+# (lo, hi, label), half-open [lo, hi). Buckets by node count; 15 is the dummy
+# trace shape in export_to_onnx.py, so it gets its own bucket.
 NUM_NODE_BUCKETS = [
     (0, 10, "<10"),
     (10, 15, "10-14"),
@@ -136,7 +127,7 @@ def iter_samples(data_path, limit):
 
 
 def compute_stats(labels, probs):
-    """All step-3 style metrics for one slice of samples. labels/probs are 1D np arrays."""
+    """Prediction metrics for one slice of samples. labels/probs are 1D np arrays."""
     stats = {
         "n": len(labels),
         "base_rate": float(np.mean(labels)),

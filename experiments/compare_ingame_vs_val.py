@@ -1,18 +1,15 @@
 """
-Read-only comparison of in-game NeuralEvaluate feature dumps (produced by
-experiments/bots/FeatureDumper.cs via SOT_DUMP_DIR) against the validation feature
-distribution. Does not modify any file and does not train anything.
+Read-only comparison of in-game NeuralEvaluate feature dumps (written by
+experiments/bots/FeatureDumper.cs via SOT_DUMP_DIR) against the validation
+feature distribution.
 
---dump-path accepts either a single .jsonl file (old behavior) or a directory,
-in which case both evals_*.jsonl (column-mean rows) and full_*.jsonl
-(full-matrix rows, mean-reduced here to column means) are pooled together
-across every game_id found.
+--dump-path takes a single .jsonl file or a directory; for a directory, all
+evals_*.jsonl (column-mean rows) and full_*.jsonl (full matrices, reduced here
+to column means) are pooled across every game_id.
 
-Requirements: same as tools/diagnose_value_net.py (torch, torch_geometric,
-onnxruntime, scikit-learn, matplotlib) -- this script imports
-GLOBAL_FEATURE_NAMES/load_pytorch_model/sigmoid from that module rather than
-duplicating them, which pulls in its full dependency set even though this
-script itself only uses torch/matplotlib directly.
+Needs the same packages as tools/diagnose_value_net.py (torch, torch_geometric,
+onnxruntime, scikit-learn, matplotlib), since it imports
+GLOBAL_FEATURE_NAMES, load_pytorch_model and sigmoid from it.
 """
 import argparse
 import glob
@@ -42,8 +39,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# (lo, hi, block name) -- half-open [lo, hi) over the NODE_DIM node-feature
-# columns, matching StateParser.encode_card's layout exactly.
+# (lo, hi, block name), half-open [lo, hi) over the NODE_DIM node-feature
+# columns, following StateParser.encode_card's layout.
 NODE_FEATURE_BLOCKS = [
     (0, 7, "deck"),
     (7, 8, "cost"),
@@ -84,8 +81,8 @@ def print_header(title):
 # ----------------------------------------------------------------------------
 
 def resolve_dump_paths(dump_path):
-    """--dump-path may be a single file (old behavior) or a directory, in which
-    case pool every evals_*.jsonl and full_*.jsonl under it."""
+    """--dump-path may be a single file or a directory, in which case every
+    evals_*.jsonl and full_*.jsonl under it is pooled."""
     if os.path.isdir(dump_path):
         paths = (sorted(glob.glob(os.path.join(dump_path, "evals_*.jsonl"))) +
                   sorted(glob.glob(os.path.join(dump_path, "full_*.jsonl"))))
@@ -171,7 +168,7 @@ def load_validation(val_path, limit, model):
 
 
 # ----------------------------------------------------------------------------
-# Step 3: csharp_prob breakdown tables
+# csharp_prob breakdown tables
 # ----------------------------------------------------------------------------
 
 def prob_stats(probs):
@@ -198,7 +195,7 @@ def print_prob_table(rows):
 
 
 # ----------------------------------------------------------------------------
-# Step 4: effect-size table (pooled std + absolute-difference floor)
+# Effect-size table (pooled std + absolute-difference floor)
 # ----------------------------------------------------------------------------
 
 ABS_DIFF_FLOOR = 0.01
@@ -258,7 +255,7 @@ def main():
     val = load_validation(args.val_path, args.val_limit, model)
     print(f"Loaded {len(val['global'])} validation samples")
 
-    # ---- Step 3: csharp_prob breakdown ----
+    # ---- csharp_prob breakdown ----
     print_header("(i) csharp_prob: overall")
     print_prob_table([("overall", prob_stats(dump["csharp_prob"]))])
 
@@ -272,7 +269,7 @@ def main():
     rows = [(f"turn={t}", prob_stats(dump["csharp_prob"][dump["turn"] == t])) for t in turns_sorted]
     print_prob_table(rows)
 
-    # ---- Step 4 applied to (a)/(b)/(c) ----
+    # ---- Effect sizes for (a)/(b)/(c) ----
     print_header("(a) Global feature columns: in-game (all) vs validation, sorted by effect size d")
     print_effect_size_table(GLOBAL_FEATURE_NAMES, dump["global"], val["global"])
 
@@ -288,7 +285,7 @@ def main():
             continue
         print_effect_size_table(GLOBAL_FEATURE_NAMES, dump["global"][mask], val["global"])
 
-    # ---- Step 5: re-plot as 1x2, log-y, split by is_terminal ----
+    # ---- Histograms: 1x2, log-y, split by is_terminal ----
     os.makedirs(OUT_DIR, exist_ok=True)
     hist_path = os.path.join(OUT_DIR, "ingame_vs_val_probs.png")
     bins = np.linspace(0, 1, 51)

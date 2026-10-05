@@ -34,42 +34,10 @@ class SakkirinaStreamDataset(IterableDataset):
         worker_id = worker_info.id if worker_info is not None else 0
         num_workers = worker_info.num_workers if worker_info is not None else 1
 
-        # PARTITION FIRST, THEN SHUFFLE. The order matters and getting it
-        # backwards silently corrupts the epoch.
-        #
-        # This used to shuffle the full list and then slice it:
-        #
-        #     shards = list(self.shards)
-        #     random.shuffle(shards)                       # WRONG
-        #     worker_shards = shards[worker_id::num_workers]
-        #
-        # Each worker is a separate process with its own `random` state, seeded
-        # per worker (see train_local.worker_init_fn), so every worker shuffled
-        # into a DIFFERENT permutation and then took its own stride from it.
-        # Slices of different permutations are not a partition: some shards were
-        # read by several workers, others by none. Measured over the 128-shard
-        # training corpus, per epoch, averaged over 400 runs:
-        #
-        #     workers   missed/epoch   duplicated/epoch   never in 3 epochs
-        #        4       31.7% ±2.6       26.2% ±2.3          3.1% ±1.4
-        #        7       33.9% ±2.6       26.3% ±2.1          4.0% ±1.5
-        #
-        # A shard was picked by each worker independently with probability
-        # 1/nw, so the miss rate is (1-1/nw)^nw -- 0.3164 at four workers,
-        # 0.3399 at seven, tending to 1/e. The measurement lands on those
-        # values, which is what confirms the mechanism rather than merely the
-        # symptom. tools/test_stream_dataset_sharding.py is the regression test.
-        #
-        # At num_workers=0 or 1 this fix changes NOTHING, bit for bit: both
-        # orderings reduce to shuffling the whole list with the same RNG state,
-        # so they produce the identical permutation. That is why the flat-MLP
-        # ablation (REPRODUCE.md section 9), which was run single-process
-        # precisely to sidestep this bug, did not need re-running afterwards.
-        #
-        # Slicing self.shards (already sorted, and identical in every worker)
-        # gives a real partition; shuffling afterwards keeps the fresh per-epoch
-        # order that the shuffle was there for, since __iter__ runs once per
-        # epoch. Each worker still only opens the files it will actually read.
+        # Partition the sorted shard list, then shuffle within this worker's
+        # share. Each worker has its own RNG, so shuffling the full list before
+        # slicing gives every worker a different permutation, and the slices
+        # stop being a partition. See tools/test_stream_dataset_sharding.py.
         worker_shards = self.shards[worker_id::num_workers]
         random.shuffle(worker_shards)
 
@@ -99,10 +67,8 @@ class SakkirinaStreamDataset(IterableDataset):
                             yield buffer[idx]
                             buffer[idx] = graph_data
                     except Exception as e:
-                        # A single malformed line must not kill a multi-hour
-                        # training run, but silently swallowing everything
-                        # (the old behavior) can hide a systematic parsing
-                        # bug -- surface the count and the first cause.
+                        # Skip a malformed line rather than abort a long run,
+                        # but count it and keep the first cause for the summary.
                         error_count += 1
                         if first_error is None:
                             first_error = f"{shard_path}: {e!r}"

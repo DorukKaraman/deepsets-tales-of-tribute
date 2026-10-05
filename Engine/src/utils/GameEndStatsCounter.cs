@@ -57,13 +57,11 @@ public class GameEndStatsCounter
             case GameEndReason.INCORRECT_MOVE:
             case GameEndReason.INTERNAL_ERROR:
             case GameEndReason.BOT_EXCEPTION:
-            // PREPARE_TIME_EXCEEDED is produced by ScriptsOfTribute.PrepareBots
-            // when a bot's PregamePrepare overruns the timeout, and was missing
-            // from this list -- it fell through to the default below and threw,
-            // killing the whole process instead of counting one game. Reachable
-            // in practice: the DeepSets agents build an ONNX InferenceSession in
-            // PregamePrepare, and experiments/configs/time_scaling.json runs
-            // timeouts as low as a few seconds.
+            // PREPARE_TIME_EXCEEDED comes from ScriptsOfTribute.PrepareBots when a bot's
+            // PregamePrepare overruns the timeout; without this case it reaches the default
+            // below, which throws and ends the process. The DeepSets agents build an ONNX
+            // InferenceSession in PregamePrepare, and time_scaling.json runs timeouts of a
+            // few seconds.
             case GameEndReason.PREPARE_TIME_EXCEEDED:
                 _otherEnds++;
                 break;

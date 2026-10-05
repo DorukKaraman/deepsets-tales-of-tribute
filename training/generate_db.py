@@ -4,7 +4,7 @@ Maps the card data from cards.json into dictionary of CardId -> 76-dim effect ve
 import json
 import re
 
-# 19 effect tokens we currently track
+# The 19 effect tokens recognised in card text.
 WORD_TO_INDEX = {
     'Coin': 0, 
     'Power': 1, 
