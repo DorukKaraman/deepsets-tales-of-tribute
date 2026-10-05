@@ -1,20 +1,17 @@
 """
-Read-only verification that the C# inference path (FeatureExtractor +
-ValueNetworkEvaluator) matches the PyTorch reference on REAL in-game inputs,
-not synthetic/random ones.
+Read-only check that the C# inference path (FeatureExtractor +
+ValueNetworkEvaluator) matches the PyTorch reference on in-game inputs.
 
-Loads full_*.jsonl dumps (experiments/bots/FeatureDumper.cs, SOT_DUMP_DIR) -- each row is
-the exact node-feature matrix and global vector NeuralEvaluate fed the ONNX
-model for one real evaluation -- replays them through the PyTorch checkpoint,
-applies sigmoid, and compares against the stored csharp_prob.
+Loads full_*.jsonl dumps (experiments/bots/FeatureDumper.cs, SOT_DUMP_DIR, or
+tools/ParityCheck's infer mode). Each row holds the node-feature matrix and
+global vector NeuralEvaluate fed the ONNX model for one evaluation. The rows are
+replayed through the PyTorch checkpoint, passed through sigmoid, and compared
+with the stored csharp_prob. A pass verifies C# inference end to end, so any
+remaining gap between in-game and validation behaviour lies in the data
+distribution.
 
-This is the decisive check for the avgNeural-vs-histogram contradiction: if it
-FAILS, there is still a C#-side feature-extraction or inference bug and that
-outranks everything else. If it PASSES, C# inference is verified end-to-end and
-every remaining discrepancy is a data-distribution problem, not a code bug.
-
-Requirements: same as tools/diagnose_value_net.py (torch, torch_geometric,
-onnxruntime, scikit-learn) -- reuses load_pytorch_model/sigmoid from there.
+Needs the same packages as tools/diagnose_value_net.py (torch, torch_geometric,
+onnxruntime, scikit-learn), whose load_pytorch_model and sigmoid it reuses.
 """
 import argparse
 import glob
@@ -38,8 +35,8 @@ AGREEMENT_THRESHOLD = 1e-4
 
 
 class Shim:
-    """Minimal stand-in for a PyG Data/Batch object -- TributeValueNetwork.forward
-    only reads .x, .u, and (optionally) .batch."""
+    """Minimal stand-in for a PyG Data/Batch object; TributeValueNetwork.forward
+    reads only .x, .u and, optionally, .batch."""
     def __init__(self, x, u):
         self.x = x
         self.u = u

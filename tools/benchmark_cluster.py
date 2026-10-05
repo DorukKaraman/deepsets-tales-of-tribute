@@ -1,134 +1,40 @@
 """
-One-game-per-SLURM-array-task benchmark runner, driven by a JSON experiment
-config. Invoked by tools/benchmark_cluster.sh -- not usually run directly (it
-skips the build + Bots.dll/onnx integrity checks tools/benchmark_cluster.sh
-does before exec'ing here).
+Run one benchmark game per SLURM array task, from a JSON experiment config.
 
-WHAT CHANGED FROM THE HARDCODED VERSION, AND WHY: the matchup list, the game
-count and the engine --timeout used to be module constants, which was fine for
-one fixed 10-matchup benchmark and impossible for a paper's worth of
-experiments -- an alpha sweep needs five runs of the SAME pair distinguished
-only by an environment variable, and a time-scaling study needs a DIFFERENT
---timeout per row. All three now come from a config file (see CONFIG FORMAT
-below), and each matchup additionally carries an `env` dict applied to that
-task's process. experiments/configs/legacy_paper_benchmark.json reproduces the
-original hardcoded list exactly -- same order, same 400 games, same --timeout
-10 -- so it lays out identically and an in-flight run resumes across this
-change.
+Invoked by tools/benchmark_cluster.sh, which first checks the build and the
+model hashes; running this directly skips those checks. The config format is
+described in experiments/configs/README.md.
 
-Everything the old version got right is unchanged: one game per OS process,
-seat swapping, resumability, and the mandatory onnx pin (which now takes a LIST
-of allowed hashes, since per-seed models mean there is no longer exactly one
-legitimate model file).
+One game per process: GameRunner's stats counter reports only per-process
+totals, so --runs 1 is what makes each game's outcome attributable.
+Concurrency comes from how the array is submitted, not from this script.
 
-DESIGN: exactly one game per OS process, exactly one process per SLURM array
-task (--task-id). GameRunner's GameEndStatsCounter only reports aggregate
-counts per process, so --runs 1 is what lets a single game's outcome be
-attributed exactly. There is no --jobs flag: concurrency is a property of how
-the array is submitted (scripts/slurm_experiment.sh's %N throttle), not of
-this script.
+Task ids: matchups are laid out contiguously in config order, each taking its
+`games` tasks, so adding a matchup anywhere but the end renumbers every task
+after it. Within a matchup the first half runs bot_a as P1 and the second half
+swaps seats. seed = seed_base + task_id.
 
-CONFIG FORMAT (see experiments/configs/*.json for real ones):
+Seat swap: GameRunner reports P1 and P2 wins. When swapped, a P1 win is a
+bot_b win (see resolve_winner); getting this backwards pulls every win rate
+towards 50%.
 
-    {
-      "name": "alpha_sweep",
-      "description": "free text, printed in the plan",
-      "seed_base": 20260922,              # --seed-base overrides
-      "patrons": "ANSEI,DUKE_OF_CROWS,...",
-      "allowed_onnx_sha256": ["86e0..."], # see ONNX PIN below
-      "bot_log": "parse",                 # parse | keep | off -- see BOT LOG
-      "defaults": {"games": 400, "timeout": 10, "env": {}},
-      "matchups": [
-        {"label": "alpha_0.00",           # optional; must be unique
-         "bot_a": "DeepSetsBotExp",
-         "bot_b": "SakkirinaSolo",
-         "games": 400,                    # falls back to defaults.games
-         "timeout": 10,                   # engine --timeout, seconds
-         "env": {"SOT_ALPHA0": "0.0"},    # merged over defaults.env
-         "note": "free text"}
-      ],
-      "calibration": {"games": 20, "matchups": [...]}   # optional, see --calibrate
-    }
+End reasons: GameRunner prints a GAME_END_REASON line per game, which this
+classifies as clean, turn_limit, timeout or disqualification, attributing a
+non-clean end to the side that caused it.
 
-TASK ID LAYOUT: matchups are laid out contiguously in config order, each
-occupying its own `games` tasks -- so unlike the old version the stride is NOT
-constant and task_id // games does not work. Offsets are cumulative sums over
-the config's matchup order, which is why ADDING A MATCHUP ANYWHERE BUT THE END
-RENUMBERS EVERY TASK AFTER IT and invalidates an in-flight run's result files.
-Within each matchup the first half of games run bot_a as P1 (swapped=False) and
-the second half run bot_b as P1 (swapped=True); first-player advantage is real,
-so an unswapped result is not a clean measurement of anything. seed = seed_base
-+ task_id, unique across the whole task space by construction.
+Evaluations per turn: DeepSetsBotExp and SakkirinaScaled log an EvalsPerTurn
+line through BotLog, which this enables per task (SOT_LOG=1) and parses.
 
-SEAT-SWAP INVERSION -- read this before touching winner logic: GameRunner
-always reports "P1 wins" / "P2 wins", not "bot_a wins" / "bot_b wins". The
-ACTUAL processes passed to GameRunner are (bot_a, bot_b) if not swapped, or
-(bot_b, bot_a) if swapped. Converting the P1/P2 result back to a bot_a/bot_b
-result therefore means: if swapped, a "P1 win" IS a bot_b win. Get this
-backwards and every matchup's aggregate win rate lands close to 50% --
-plausible-looking and wrong. See resolve_winner() below, and verify its output
-against the printed "p1={p1}/p2={p2}" plus swapped flag directly, not just the
-final "winner" label, if you ever touch this.
+Model checks, in three layers. benchmark_cluster.sh checks GameRunner's own
+model against builtin_onnx_sha256. check_task_model() requires a row's
+SOT_MODEL_PATH to be in allowed_onnx_sha256. After the game,
+verify_loaded_models() requires the hash each bot logged to match that row's
+model; a bot that fails to load its model falls back silently, so this is the
+only check that confirms a row ran its own model.
 
-DISQUALIFICATIONS VS TIMEOUTS: GameRunner's stats block buckets TURN_TIMEOUT,
-INCORRECT_MOVE, BOT_EXCEPTION and friends together as "other factors". That is
-not good enough here. At a 2s per-turn budget a game lost to a timeout is not a
-game lost to play, and reporting them together would make a budget that is
-simply too tight look like an agent that is simply worse. GameRunner therefore
-prints one GAME_END_REASON line per game with the exact GameEndReason, and this
-script classifies it into clean / turn_limit / timeout / disqualification and
-records which side caused it (the engine awards the win to the opponent, so the
-offender is the loser). tools/aggregate_benchmark_results.py reports the three
-non-clean categories separately, per matchup, per side.
-
-EVALUATIONS PER TURN: DeepSetsBotExp and SakkirinaScaled each emit an
-"<Class>.EvalsPerTurn:" line at game end via BotLog. BotLog writes nothing
-unless SOT_LOG=1, so this script enables it per task into a private log file,
-parses that one number per agent into the result JSON, and (by default) deletes
-the log. That makes equal-effort matching measurable from any run, not just a
-dedicated one -- and --calibrate below is just this, run over a handful of
-games with nothing else going on.
-
-ONNX PIN: MANDATORY and not skippable, in three separate layers. A bot that
-fails to load its model does not crash or refuse to play -- it silently falls
-back to a heuristic evaluator, so a 2000-game run against the wrong model
-produces a full set of plausible-looking numbers for the wrong experiment.
-
-  1. STALE BUILD. tools/benchmark_cluster.sh checks GameRunner's own copy of
-     the model against the config's "builtin_onnx_sha256" (default: the
-     shipped model). This asks "was the binary built against the model this
-     config was written for".
-
-  2. ROW PIN, before the game. check_task_model() hashes whatever file a
-     matchup's SOT_MODEL_PATH names and requires it to be in the config's
-     "allowed_onnx_sha256". A LIST, because per-seed training
-     (scripts/slurm_train.sh) produces several legitimate models.
-
-  3. WHAT WAS ACTUALLY LOADED, after the game. verify_loaded_models() reads
-     back the sha256 each bot logged in PregamePrepare and requires it to
-     match that row's own expected model. No line, or the wrong hash, fails
-     the task and writes no result.
-
-Layers 1 and 2 are deliberately separate lists. They were one list, and that
-was wrong in a way worth recording: the built-in copy was checked against
-allowed_onnx_sha256, so every config had to whitelist the shipped hash even
-when no row should ever load it -- and a whitelisted shipped hash means a row
-that silently fell back to the built-in model passes the pin. For a control row
-running the same architecture at the same speed, no other signal would have
-caught it.
-
-Layer 3 is what makes the guarantee per-row. Layers 1 and 2 are set checks on
-files; they can confirm a task pointed at one of the config's known models, but
-never that seed 3's row ran seed 3's model. Only the bot knows that, and it
-says so in its log.
-
-RESUMABILITY: a task's result file (see result_path()) is written ONLY after a
-game completes and its stats are parsed successfully -- never before, never on
-a process crash/timeout. A crashed/killed/still-running task therefore has no
-result file and is retried by simply resubmitting the same array indices; an
-already-completed task is detected and skipped immediately, without invoking
-GameRunner at all. Written atomically (temp file + os.replace) so a task killed
-mid-write never leaves a result file that looks valid but isn't.
+Resumability: a result file is written atomically, and only after a game
+completes and parses. A task without one is retried on resubmission; a task
+with one is skipped.
 """
 import argparse
 import datetime
@@ -150,18 +56,13 @@ DEFAULT_GAMES = 400
 DEFAULT_TIMEOUT_S = 10
 DEFAULT_CALIBRATION_GAMES = 20
 
-# The shipped model. A config's "allowed_onnx_sha256" replaces this list
-# wholesale (it does not extend it), so a config that pins a seed's model must
-# list every hash its matchups may legitimately load, including this one if any
-# matchup leaves SOT_MODEL_PATH unset.
+# Default allowed list. A config's allowed_onnx_sha256 replaces it rather than
+# extending it.
 SHIPPED_ONNX_SHA256 = "86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"
 
-# A config value that is literally "TBD" is a placeholder the author has not
-# filled in yet (experiments/configs/equal_effort.json ships that way on
-# purpose, waiting on a calibration run). Running it would silently fall back
-# to the bot's default and produce a result labelled as something it is not, so
-# it is refused instead. Checked case-insensitively, on both env values and
-# scalar fields.
+# A literal "TBD" marks a value not yet calibrated. Matchups containing one still
+# load, so --dry-run and --calibrate work, but refuse to run a game. Checked
+# case-insensitively, on env values and scalar fields.
 TBD_SENTINEL = "TBD"
 
 LINE_PATTERNS = {
@@ -177,8 +78,8 @@ LINE_PATTERNS = {
 REQUIRED_KEYS = set(LINE_PATTERNS)
 CLEAN_REASONS = {"prestige40", "prestige80", "patron_favor"}
 
-# Printed once per game by GameRunner/Program.cs. The stats block above cannot
-# distinguish a timeout from an illegal move; this can.
+# One line per game from GameRunner/Program.cs, with the exact end reason, which
+# the aggregate stats block cannot give.
 GAME_END_REASON_PATTERN = re.compile(r"^GAME_END_REASON:\s*(\w+)\s+WINNER:\s*(\w+)\s*$", re.MULTILINE)
 
 # Emitted at game end by experiments/bots/DeepSetsBotExp.cs and by
@@ -186,44 +87,37 @@ GAME_END_REASON_PATTERN = re.compile(r"^GAME_END_REASON:\s*(\w+)\s+WINNER:\s*(\w
 EVALS_PER_TURN_PATTERN = re.compile(
     r"(\w+)\.EvalsPerTurn:\s*totalEvalCalls=(\d+),\s*turns=(\d+),\s*meanEvalsPerTurn=([0-9.]+)")
 
-# Emitted once per game in PregamePrepare by every bot that loads an ONNX
-# model, naming the file it actually resolved and hashing it. This is the only
-# statement of what a game really ran; everything else is inference from
-# configuration.
+# Logged in PregamePrepare by each bot that loads an ONNX model: the path it
+# resolved and the file's sha256.
 LOADED_MODEL_PATTERN = re.compile(
     r"(\w+)\.PregamePrepare:\s*ONNX model loaded OK from '([^']*)',\s*"
     r"size=(\d+) bytes,\s*sha256=([0-9a-fA-F]{64})")
 
-# Bots that load an ONNX model and log the line above. A bot here MUST produce
-# that line or its task fails -- silence means either that the load failed (the
-# bot logs FAILED and falls back to a heuristic, still playing a full game) or
-# that the log never reached us, and neither is a result worth keeping.
+# Bots that load an ONNX model and log the line above. A missing line fails the
+# task: either the load failed and the bot fell back to its heuristic, or the log
+# was lost.
 MODEL_LOADING_BOTS = {
     "DeepSetsBot", "DeepSetsBlendBot",
     "DeepSetsBotTrim", "DeepSetsBlendBotTrim",
     "DeepSetsBotExp",
 }
 
-# Of those, the ones that honour SOT_MODEL_PATH. The rest always load
-# GameRunner's own copy, so their expected hash is builtin_onnx_sha256 even in
-# a matchup where the other side is pointed somewhere else.
+# Of those, the bots that honour SOT_MODEL_PATH. The others always load
+# GameRunner's own copy.
 SOT_MODEL_PATH_BOTS = {"DeepSetsBotExp"}
 
-# Exhaustive over ScriptsOfTribute.Board.GameEndReason. A reason that is not
-# here is classified "unknown" rather than quietly folded into one of these --
-# a new enum value must be classified deliberately, not by default.
+# Exhaustive over ScriptsOfTribute.Board.GameEndReason. An unlisted reason is
+# classified "unknown" rather than folded into one of these.
 REASON_CATEGORY = {
     "PRESTIGE_OVER_40_NOT_MATCHED": "clean",
     "PRESTIGE_OVER_80": "clean",
     "PATRON_FAVOR": "clean",
     "TURN_LIMIT_EXCEEDED": "turn_limit",
-    # The clock ran out. Says something about the budget, not about play --
-    # which is exactly why time_scaling.json needs these counted separately.
+    # The clock ran out: a budget effect, not a playing one.
     "TURN_TIMEOUT": "timeout",
     "PATRON_SELECTION_TIMEOUT": "timeout",
     "PREPARE_TIME_EXCEEDED": "timeout",
-    # The agent did something the engine rejected outright. A real defect in
-    # the agent (or in the harness feeding it), never a budget artefact.
+    # The engine rejected the agent's move: a defect, not a budget effect.
     "INCORRECT_MOVE": "disqualification",
     "BOT_EXCEPTION": "disqualification",
     "PATRON_SELECTION_FAILURE": "disqualification",
@@ -269,10 +163,8 @@ def _normalize_matchups(raw_matchups, defaults, where):
         timeout = m.get("timeout", defaults.get("timeout", DEFAULT_TIMEOUT_S))
         label = m.get("label") or f"{m['bot_a']}_vs_{m['bot_b']}"
 
-        # An unfilled matchup still has to LOAD, so that --dry-run can print the
-        # plan and --calibrate can run, both of which are how you get the value
-        # that fills it in. It is refused at the point of actually running a
-        # game -- see tbd_reason() and its call sites.
+        # A matchup with a TBD value still loads, so --dry-run and --calibrate can run;
+        # run_task refuses it (see tbd_reason).
         tbd = sorted(k for k, v in env.items() if _is_tbd(v))
         if _is_tbd(timeout):
             tbd.append("timeout")
@@ -293,10 +185,7 @@ def _normalize_matchups(raw_matchups, defaults, where):
 
 
 def tbd_reason(matchup):
-    """The refusal message for a matchup that still carries placeholders, or
-    None. Running one would fall back to whatever default the bot has and
-    produce a full set of numbers labelled as an experiment that was never
-    performed -- which is indistinguishable, afterwards, from a real result."""
+    """The refusal message for a matchup that still has TBD values, or None."""
     if not matchup["tbd"]:
         return None
     return (f"matchup [{matchup['index']}] {matchup['label']} still has {TBD_SENTINEL} placeholders: "
@@ -308,8 +197,7 @@ def tbd_reason(matchup):
 def _validate_matchups(matchups, where):
     seen = {}
     for m in matchups:
-        # Labels become directory names, so a duplicate would silently pool two
-        # different experimental conditions into one result directory.
+        # Labels become directory names, so a duplicate would merge two conditions.
         if m["label"] in seen:
             raise ConfigError(
                 f"{where}: duplicate label {m['label']!r} (matchups {seen[m['label']]} and {m['index']}). "
@@ -320,9 +208,7 @@ def _validate_matchups(matchups, where):
             raise ConfigError(f"{where}[{m['index']}]: label {m['label']!r} must be a bare filename "
                               f"(letters, digits, and . _ + - only)")
 
-        # games, unlike timeout and env, may NOT be TBD: the task-id layout is
-        # a cumulative sum over game counts, so an unknown count means there is
-        # no plan to print and no array to submit.
+        # games cannot be TBD: task ids are cumulative sums of game counts.
         if not isinstance(m["games"], int) or isinstance(m["games"], bool) or m["games"] < 1:
             raise ConfigError(f"{where}[{m['index']}] ({m['label']}): games must be a positive integer "
                               f"(it determines the task-id layout, so it cannot be {TBD_SENTINEL}), "
@@ -360,10 +246,8 @@ def load_config(path, seed_base_override=None):
     if calibration_raw.get("matchups"):
         calib_matchups = _normalize_matchups(calibration_raw["matchups"], calib_defaults, "calibration.matchups")
     else:
-        # No dedicated calibration block: calibrate on the run's own matchups.
-        # Only valid if they are runnable, i.e. carry no TBD placeholders --
-        # which is exactly the case equal_effort.json is NOT in, hence its own
-        # calibration block.
+        # Without a calibration block, calibrate on the run's own matchups, which must
+        # then carry no TBD values.
         calib_matchups = _normalize_matchups(raw["matchups"], calib_defaults, "calibration.matchups")
         for m in calib_matchups:
             m["games"] = calibration_raw.get("games", DEFAULT_CALIBRATION_GAMES)
@@ -399,11 +283,9 @@ def load_config(path, seed_base_override=None):
         "total_tasks": offset,
     }
 
-    # A matchup that overrides SOT_MODEL_PATH is exactly the case the per-task
-    # loaded-model check exists for, and that check reads the bot log. Refuse
-    # the combination rather than skipping the check silently: an override that
-    # fails to load falls back to GameRunner's built-in model and plays on, and
-    # with the log off nothing downstream can tell.
+    # The loaded-model check reads the bot log, so a matchup that overrides
+    # SOT_MODEL_PATH needs the log on. A failed override falls back to the built-in
+    # model without any error.
     if config["bot_log"] not in ("parse", "keep"):
         overriding = [m["label"] for m in matchups
                       if m["env"].get("SOT_MODEL_PATH")]
@@ -491,8 +373,8 @@ def write_result_atomic(path, data):
 
 
 def resolve_winner(p1_wins, p2_wins, swapped):
-    """Returns "bot_a", "bot_b", or "draw". See the seat-swap docstring note
-    at the top of this file before changing this function."""
+    """Returns "bot_a", "bot_b", or "draw", undoing the seat swap (see the
+    module docstring)."""
     if p1_wins == 1:
         return "bot_b" if swapped else "bot_a"
     if p2_wins == 1:
@@ -501,8 +383,8 @@ def resolve_winner(p1_wins, p2_wins, swapped):
 
 
 def resolve_end_reason(parsed):
-    """Coarse bucket from the aggregate stats block, kept for backwards
-    compatibility with result files written before GAME_END_REASON existed."""
+    """Coarse bucket from the aggregate stats block, used when GameRunner's
+    output has no GAME_END_REASON line."""
     for key in ("prestige40", "prestige80", "patron_favor", "turn_limit", "other"):
         if parsed.get(key, (0, 0))[0] == 1:
             return key
@@ -531,9 +413,7 @@ def mean(values):
 
 
 def stdev(values):
-    """Sample standard deviation; 0.0 for fewer than two values. Reported
-    alongside every calibration mean because the per-game spread here is wide
-    enough that a mean over a handful of games can be misleading on its own."""
+    """Sample standard deviation; 0.0 for fewer than two values."""
     if len(values) < 2:
         return 0.0
     m = mean(values)
@@ -541,12 +421,8 @@ def stdev(values):
 
 
 def proc_timeout_for(task):
-    """Safety-net subprocess watchdog. SLURM's own --time is the real per-task
-    limit; this just makes sure a hang doesn't also wedge whatever invoked this
-    script directly. Scaled by the matchup's own engine timeout, since a
-    30s-budget game legitimately takes far longer than a 2s-budget one. A TBD
-    timeout gets the floor -- run_task refuses that task anyway, this only has
-    to not crash on the arithmetic."""
+    """Process watchdog, scaled by the matchup's engine timeout. SLURM's --time
+    is the real limit; this stops a hang from wedging a direct invocation."""
     timeout = task["timeout"] if isinstance(task["timeout"], int) else 0
     return max(1800, timeout * 180)
 
@@ -581,15 +457,10 @@ def parse_loaded_models(bot_log_path):
 
 
 def expected_model_sha(task, config, bot):
-    """Which model SHOULD this bot have loaded in this task?
+    """Expected (sha256, source) for this bot in this task, or (None, None).
 
-    Only the bots in SOT_MODEL_PATH_BOTS read the override; everything else
-    loads GameRunner's built-in copy regardless of what the matchup sets. That
-    distinction matters in a mixed matchup, where pinning both sides to the
-    override's hash would fail a game that behaved perfectly correctly.
-
-    Returns (sha256, source_description) or (None, None) if the bot loads no
-    model.
+    Only SOT_MODEL_PATH_BOTS read the override; the rest load GameRunner's
+    built-in copy, even when the other side of the matchup is overridden.
     """
     if bot not in MODEL_LOADING_BOTS:
         return None, None
@@ -602,16 +473,12 @@ def expected_model_sha(task, config, bot):
 
 
 def verify_loaded_models(task, config, loaded):
-    """Did every model-loading bot in this matchup load the model it was
-    supposed to? Returns an error string, or None.
+    """Check that each model-loading bot loaded its row's own model. Returns an
+    error string, or None.
 
-    THIS IS THE CHECK THAT MAKES THE PIN PER-ROW. allowed_onnx_sha256 is a SET
-    check on a file before the game: it can confirm that a task pointed at one
-    of the config's known models, never that seed 3's row actually ran seed 3's
-    model. A model that fails to load is silent -- the bot logs the failure and
-    plays the whole game on its heuristic fallback -- so without reading back
-    what was loaded, a row that quietly fell back to GameRunner's built-in copy
-    is indistinguishable from one that worked.
+    allowed_onnx_sha256 checks only the file a row points at. A model that fails
+    to load is silent (the bot plays on its heuristic), so the hash the bot logged
+    is the only evidence of what it actually ran.
     """
     if config["bot_log"] not in ("parse", "keep"):
         return None
@@ -641,11 +508,8 @@ def verify_loaded_models(task, config, loaded):
 
 
 def check_task_model(task, allowed_hashes):
-    """SOT_MODEL_PATH points a bot at a model other than GameRunner's own copy,
-    which tools/benchmark_cluster.sh already verified. This is the only place
-    that override can be checked -- and it must be, for the same reason the
-    other check exists: a bot whose model fails to load does not crash, it
-    silently falls back to a heuristic. Returns an error string, or None."""
+    """Check that a row's SOT_MODEL_PATH exists and is in allowed_onnx_sha256.
+    Returns an error string, or None."""
     model_path = task["env"].get("SOT_MODEL_PATH")
     if not model_path:
         return None
@@ -666,10 +530,8 @@ def check_task_model(task, allowed_hashes):
 # --------------------------------------------------------------------------
 
 def build_env(task, bot_log_path):
-    """The task's process environment: the ambient one, minus every SOT_*
-    variable this harness manages (so an exported SOT_ALPHA0 in the submitting
-    shell cannot leak into a run that never asked for it), plus the matchup's
-    own env, plus the bot log wiring."""
+    """The task's environment: the ambient one without the SOT_* variables
+    this harness manages, plus the matchup's env and the bot-log settings."""
     env = os.environ.copy()
     for key in ("SOT_LOG", "SOT_LOG_FILE", "SOT_DUMP_DIR", "SOT_ALPHA0",
                 "SOT_TIME_SCALE", "SOT_BASELINE_TIME_SCALE", "SOT_MODEL_PATH"):
@@ -682,11 +544,9 @@ def build_env(task, bot_log_path):
 
 
 def parse_evals_per_turn(bot_log_path):
-    """Maps each agent CLASS that reported throughput to its mean evaluations
-    per turn. Keyed by class, not by seat: BotLog has no idea which seat it is
-    writing for. In a self-play matchup both instances log under the same class
-    name, so the two cannot be told apart -- that case is averaged and flagged
-    rather than guessed at."""
+    """Mean evaluations per turn, keyed by agent class. BotLog does not know
+    the seat, so in self-play both instances share a class; that case is
+    averaged and flagged."""
     if not bot_log_path or not os.path.isfile(bot_log_path):
         return {}, []
     try:
@@ -763,9 +623,8 @@ def run_task(binary, task, out_dir, config, proc_timeout_s):
     detail_match = GAME_END_REASON_PATTERN.search(stdout)
     reason_detail = detail_match.group(1) if detail_match else None
     category = classify(reason_detail)
-    # Without the GAME_END_REASON line (an older GameRunner), fall back to the
-    # coarse bucket, which can still tell clean from turn_limit but lumps
-    # timeouts and disqualifications together as "other".
+    # Older GameRunner builds print no GAME_END_REASON line; fall back to the
+    # coarse bucket, which cannot separate timeouts from disqualifications.
     if reason_detail is None:
         category = {"prestige40": "clean", "prestige80": "clean", "patron_favor": "clean",
                     "turn_limit": "turn_limit"}.get(end_reason, "unknown")
@@ -774,9 +633,8 @@ def run_task(binary, task, out_dir, config, proc_timeout_s):
     loaded_models = parse_loaded_models(bot_log_path)
     load_err = verify_loaded_models(task, config, loaded_models)
 
-    # The log is the evidence for the failure, so keep it when the check fails
-    # even under bot_log=parse. On success it is deleted as before -- one file
-    # per game across 2,400 games is not worth keeping for its own sake.
+    # Keep the log when the check fails, as evidence; otherwise bot_log=parse
+    # deletes it.
     if bot_log_path and config["bot_log"] == "parse" and load_err is None:
         try:
             os.remove(bot_log_path)
@@ -814,10 +672,7 @@ def run_task(binary, task, out_dir, config, proc_timeout_s):
         "offender": resolve_offender(winner) if category in ("timeout", "disqualification") else None,
         "evals_per_turn": evals_per_turn,
         "evals_per_turn_ambiguous": ambiguous,
-        # What each bot ACTUALLY loaded, read back from its own log rather than
-        # inferred from the config. Recorded so a finished run can be audited
-        # per row after the fact, without re-reading bot logs that parse mode
-        # has already deleted.
+        # The model each bot actually loaded, from its own log.
         "loaded_models": loaded_models,
         "wall_clock_s": round(wall_clock_s, 1),
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -905,11 +760,9 @@ def print_full_plan(config, out_dir):
 # --------------------------------------------------------------------------
 
 def run_calibration(config, binary, out_dir, games_override):
-    """Runs a handful of games per calibration matchup and reports mean
-    evaluations per turn for each agent, so an equal-effort SOT_TIME_SCALE can
-    be chosen. Sequential, one game per process, resumable from the same result
-    files as a normal run -- it is a normal run with a small game count and
-    somewhere else to put the results."""
+    """Run a few games per calibration matchup and report mean evaluations
+    per turn per agent, for choosing an equal-effort SOT_TIME_SCALE. Results go
+    in a calibration/ subdirectory and resume like a normal run."""
     matchups = [dict(m) for m in config["calibration_matchups"]]
     if games_override is not None:
         for m in matchups:
@@ -955,11 +808,8 @@ def run_calibration(config, binary, out_dir, games_override):
         by_matchup.setdefault(task["matchup"], []).append(result)
 
     for label, results in by_matchup.items():
-        # Per turn AND per game. They are not redundant: per-turn is the figure
-        # equal-effort matching is defined on, but per-game is what earlier
-        # measurements in this repository reported, and the two only agree if
-        # both agents played the same number of turns -- which is worth seeing
-        # rather than assuming. The turn counts are printed for that reason.
+        # Reported per turn and per game. The two agree only if both agents played
+        # the same number of turns, so the turn counts are printed too.
         per_turn, per_game, turns = {}, {}, {}
         for r in results:
             for cls, stats in (r.get("evals_per_turn") or {}).items():

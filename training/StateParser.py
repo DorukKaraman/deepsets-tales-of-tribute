@@ -1,9 +1,10 @@
 """
-Turns gamestate into tensors for training.
+Turns a logged game state into the node matrix and global vector the value
+network trains on.
 
-Schema mirrored exactly in Bots/src/DeepSetsCore.cs (class FeatureExtractor) -- any change here
-MUST be made there too, in the same commit. After editing either file, run
-python tools/verify_parity.py before proceeding.
+The same schema is implemented in C# by FeatureExtractor in
+Bots/src/DeepSetsCore.cs. A change to one must be made to the other; check
+the two with tools/verify_parity.py.
 """
 
 import torch
@@ -21,17 +22,12 @@ LOC_MY_DRAW        = 4.0
 LOC_MY_AGENT       = 5.0
 LOC_ENEMY_AGENT    = 6.0
 LOC_ENEMY_COOLDOWN = 7.0
-LOC_ENEMY_UNSEEN   = 8.0  # EnemyPlayer.HandAndDraw -- replaces the old, always-
-                          # empty ENEMY_PLAYED slot. Enemy deck composition is
-                          # public in ToT (all acquisitions come from the
-                          # face-up tavern); only the order of what's left in
-                          # hand/draw is hidden.
+LOC_ENEMY_UNSEEN   = 8.0  # Enemy hand and draw pile combined. Deck composition is
+                          # public; only the order and the hand/draw split are hidden.
 
-# Competition-only patron pool: PSIJIC, HLAALU, RED_EAGLE can never appear
-# (verified against the engine's PatronId enum and against 50 games of
-# generated data -- deck values seen were exactly [0,1,2,4,6,8,9]).
-# id -> one-hot slot in the node vector's Deck block. Anything not in this
-# map stays all-zero, deliberately.
+# Patron id -> one-hot slot in the node vector's Deck block. Only the
+# competition pool is mapped; PSIJIC, HLAALU and RED_EAGLE never appear and
+# encode as all-zero.
 DECK_ID_TO_SLOT = {
     0: 0,  # ANSEI
     1: 1,  # DUKE_OF_CROWS
@@ -42,14 +38,9 @@ DECK_ID_TO_SLOT = {
     9: 6,  # SAINT_ALESSIA
 }
 
-# Competition-only, favour-eligible patrons for the global vector's favour
-# block. TREASURY is deliberately excluded: it has no favour mechanic
-# (neither player can be favoured by it), confirmed empirically -- its
-# PatronStates.All value is NO_PLAYER_SELECTED in 1753/1753 sampled records
-# -- so its slot was a constant 0.0 contributing nothing. TREASURY still
-# appears in the node vector's Deck one-hot (DECK_ID_TO_SLOT) since Treasury
-# cards exist on the board and must be encoded; only this favour list drops
-# it. Matches DeepSetsCore.cs's FeatureExtractor PatronOrder exactly.
+# Patrons that can be favoured, in global-vector order; matches PatronOrder in
+# DeepSetsCore.cs. TREASURY has no favour mechanic, so it is left out here,
+# though its cards are still encoded through DECK_ID_TO_SLOT.
 PATRON_ORDER = [
     "ANSEI", "DUKE_OF_CROWS", "RAJHIN", "ORGNUM", "PELIN", "SAINT_ALESSIA",
 ]
@@ -64,9 +55,7 @@ def encode_card(card_dict, location_id=0.0):
     if card_dict is None:
         return vector
 
-    # [Indices 0-6] Deck (7 dims, One-Hot over the live competition patrons
-    # only -- anything else, e.g. PSIJIC/HLAALU/RED_EAGLE, stays all-zero
-    # since it can never appear in a competition game).
+    # [Indices 0-6] Deck (7 dims, one-hot over the competition patrons)
     deck = int(card_dict.get('Deck', -1))
     if deck in DECK_ID_TO_SLOT:
         vector[DECK_ID_TO_SLOT[deck]] = 1.0
@@ -117,12 +106,9 @@ def extract_global_context(game_state):
     global_vec[5] = float(enemy.get("Power", 0)) / 10.0
     global_vec[6] = float(enemy.get("Prestige", 0)) / 40.0
 
-    # [Indices 7-12] Patron favour. PatronStates.All values are PlayerEnum
-    # ints (0=PLAYER1, 1=PLAYER2, 2=NO_PLAYER_SELECTED) -- resolved against
-    # the logged CurrentPlayer.PlayerID, NOT hardcoded to PLAYER1. This was a
-    # no-op on the old (bot1-only) dataset because PlayerID was always 0; now
-    # that both perspectives are logged, PlayerID is 0 or 1 and a hardcoded
-    # favor_map would be wrong on every PlayerID==1 record.
+    # [Indices 7-12] Patron favour. PatronStates.All holds PlayerEnum ints
+    # (0=PLAYER1, 1=PLAYER2, 2=NO_PLAYER_SELECTED). Compare against the logged
+    # CurrentPlayer.PlayerID, since records are logged from both seats.
     current_player_id = int(current.get("PlayerID", 0))
     patron_dict = game_state.get("PatronStates", {}).get("All", {})
 
@@ -148,11 +134,11 @@ def extract_global_context(game_state):
     # [Index 14] Prestige differential
     global_vec[14] = (my_prestige - enemy_prestige) / 40.0
 
-    # [Index 15] My deck size (hand + played + cooldown + draw, NOT agents)
+    # [Index 15] My deck size (hand + played + cooldown + draw, excluding agents)
     global_vec[15] = (len(current.get("Hand", [])) + len(current.get("Played", [])) +
                        len(current.get("CooldownPile", [])) + len(current.get("DrawPile", []))) / 30.0
 
-    # [Index 16] Enemy known deck size (HandAndDraw + cooldown, NOT agents)
+    # [Index 16] Enemy known deck size (HandAndDraw + cooldown, excluding agents)
     global_vec[16] = (len(enemy.get("HandAndDraw", [])) + len(enemy.get("CooldownPile", []))) / 30.0
 
     # [Indices 17-18] Agent counts
@@ -166,31 +152,27 @@ def json_to_pyg_graph(game_state):
     """
     Pack one game state into a PyG Data object.
     """
+    # Node order is part of the schema: the flat-MLP ablation is not
+    # permutation-invariant, and DeepSetsCore.cs emits the same order.
     all_nodes = []
 
-    # Parse Tavern Cards
     tavern_cards = game_state.get("TavernAvailableCards", [])
     for card in tavern_cards:
         all_nodes.append(encode_card(card, LOC_TAVERN))
 
-    # Parse Current Player Hand
     current = game_state.get("CurrentPlayer", {})
     for card in current.get("Hand", []):
         all_nodes.append(encode_card(card, LOC_MY_HAND))
 
-    # Parse Current Player Played
     for card in current.get("Played", []):
         all_nodes.append(encode_card(card, LOC_MY_PLAYED))
 
-    # Parse Current Player Cooldown
     for card in current.get("CooldownPile", []):
         all_nodes.append(encode_card(card, LOC_MY_COOLDOWN))
 
-    # Parse Current Player DrawPile
     for card in current.get("DrawPile", []):
         all_nodes.append(encode_card(card, LOC_MY_DRAW))
 
-    # Parse Current Player Agents
     for agent in current.get("Agents", []):
         card = agent.get("RepresentingCard", agent)
         card_with_stats = dict(card)
@@ -198,7 +180,6 @@ def json_to_pyg_graph(game_state):
         card_with_stats['Taunt'] = agent.get('Taunt', card.get('Taunt', False))
         all_nodes.append(encode_card(card_with_stats, LOC_MY_AGENT))
 
-    # Parse Enemy Player Agents
     enemy = game_state.get("EnemyPlayer", {})
     for agent in enemy.get("Agents", []):
         card = agent.get("RepresentingCard", agent)
@@ -207,15 +188,13 @@ def json_to_pyg_graph(game_state):
         card_with_stats['Taunt'] = agent.get('Taunt', card.get('Taunt', False))
         all_nodes.append(encode_card(card_with_stats, LOC_ENEMY_AGENT))
 
-    # Parse Enemy Player CooldownPile
     for card in enemy.get("CooldownPile", []):
         all_nodes.append(encode_card(card, LOC_ENEMY_COOLDOWN))
 
-    # Parse Enemy Player HandAndDraw (publicly known deck composition; order hidden)
     for card in enemy.get("HandAndDraw", []):
         all_nodes.append(encode_card(card, LOC_ENEMY_UNSEEN))
 
-    # If the board is completely empty, insert one dummy 0 vector card. (Does not happen but is a failsafe)
+    # An empty board does not occur; one zero node keeps the shapes valid if it does.
     if len(all_nodes) == 0:
         all_nodes.append(torch.zeros(NODE_DIM, dtype=torch.float32))
 

@@ -2,29 +2,22 @@
 # Create the CPU-only Python environment the training/ and tools/ scripts need,
 # with every version pinned.
 #
-# WHY PINNED, AND WHY THIS PARTICULAR TORCH
-# An ONNX file embeds producer_version, so exporting the same checkpoint on a
-# different PyTorch version produces a byte-different file with a different
-# SHA-256, even though the operator graph, the initializer names and the weights
-# are all identical (verified directly -- see REPRODUCE.md, "Reproducing the
-# model file byte for byte").
+# An ONNX file embeds producer_version, so exporting the same checkpoint under a
+# different PyTorch gives a byte-different file with a different SHA-256, though
+# the operator graph, initializer names and weights are identical (see
+# REPRODUCE.md, "Reproducing the model file byte for byte").
 #
-#   torch 2.2.2 is the version that reproduces the shipped
-#   models/DeepSetsValueNetwork.onnx byte hash
+#   torch 2.2.2 reproduces the shipped models/DeepSetsValueNetwork.onnx byte hash
 #   86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915.
 #
-# That hash is what the benchmark harnesses pin against, so an environment on
-# any other torch will fail their integrity check with a perfectly good model.
-# On a different version the model still reproduces exactly; only the file hash
-# does not, and the fix is to add the new hash to the config's
-# allowed_onnx_sha256 rather than to chase the old one.
+# The benchmark harnesses pin that hash, so under another torch a correct model
+# fails their integrity check. The model itself still reproduces; add the new
+# hash to the config's allowed_onnx_sha256.
 #
-# CPU ONLY, deliberately: the cluster partition these experiments run on has no
-# GPUs, and the CUDA wheels are several GB of download that would never be used.
-# The CPU index URL below is what keeps pip from pulling them in.
+# CPU only: the cluster partition has no GPUs, and the CUDA wheels are several GB.
+# The CPU index URL below keeps pip from pulling them in.
 #
-# Idempotent: safe to re-run. It will not overwrite an existing venv unless
-# --force is given.
+# Safe to re-run; an existing venv is kept unless --force is given.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,30 +26,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # --- Pinned versions -------------------------------------------------------
 # torch: see the header. Do not bump without re-reading REPRODUCE.md.
 TORCH_VERSION="2.2.2"
-# torch_geometric 2.5.x is the line built against torch 2.2. Only the pure
-# Python package is needed (Data containers, DataLoader, global_mean_pool) --
-# NOT the compiled torch-scatter/torch-sparse extensions, which torch_geometric
-# has not required for these operations since 2.3.
+# torch_geometric 2.5.x is the line built against torch 2.2. Only the pure Python
+# package is needed (Data containers, DataLoader, global_mean_pool), not the
+# compiled torch-scatter/torch-sparse extensions.
 PYG_VERSION="2.5.3"
-# numpy < 2 is a hard requirement of torch 2.2.x, not a preference: torch 2.2
-# was built against the NumPy 1.x ABI and fails at import against 2.x.
+# torch 2.2 was built against the NumPy 1.x ABI and fails to import with 2.x.
 NUMPY_VERSION="1.26.4"
 ONNXRUNTIME_VERSION="1.17.3"
 SKLEARN_VERSION="1.4.2"
 # Only tools/diagnose_value_net.py needs this, and only to write two PNGs.
 MATPLOTLIB_VERSION="3.8.4"
 
-# onnx (the format library) is SEPARATE from onnxruntime (the inference engine)
-# and is not pulled in by it. torch.onnx.export imports onnx at call time, so
-# without it training/export_to_onnx.py dies with ModuleNotFoundError partway
-# through -- after training has finished, which on the cluster means a seed's
-# checkpoint is on disk but its .onnx is not. That is exactly what happened
-# during the per-seed training run and had to be patched by hand.
+# onnx (the format library) is separate from onnxruntime and not pulled in by
+# it. torch.onnx.export imports it at call time, so without it export_to_onnx.py
+# fails after training has finished, leaving a checkpoint without its .onnx.
 #
-# Version-gated by Python, because onnx >= 1.20 requires Python >= 3.10 and the
-# supported range here is 3.9-3.11 (see the PY_VER check below), so BOTH
-# branches are reachable: the cluster's Python is 3.9, a local macOS install is
-# typically 3.10/3.11.
+# Gated by Python version: onnx >= 1.20 needs Python >= 3.10, and the supported
+# range is 3.9-3.11 (see the PY_VER check below). The cluster runs 3.9; a local
+# macOS install is typically 3.10/3.11.
 ONNX_VERSION_PY39="1.19.1"
 ONNX_VERSION_PY310_PLUS="1.21.0"
 
@@ -149,9 +136,8 @@ python -m pip install --upgrade pip
 
 echo
 echo "=== Installing CPU-only torch $TORCH_VERSION ==="
-# --index-url, not --extra-index-url: with --extra, pip is free to resolve torch
-# from PyPI instead, which on Linux is the CUDA build. The whole point of this
-# line is that it cannot.
+# --index-url, not --extra-index-url: with --extra, pip may resolve torch from
+# PyPI, which on Linux is the CUDA build.
 python -m pip install --index-url "$TORCH_CPU_INDEX" "torch==$TORCH_VERSION"
 
 echo
@@ -163,12 +149,9 @@ PACKAGES=(
   "onnxruntime==$ONNXRUNTIME_VERSION"
   "scikit-learn==$SKLEARN_VERSION"
 )
-# onnx 1.19.1 pulls ml_dtypes as a transitive dependency (0.5.4 at time of
-# writing). It is deliberately NOT pinned: every pin in this script is a direct
-# dependency of our own code, and the transitive closure -- scipy and joblib
-# under scikit-learn, filelock and sympy under torch -- is left to pip
-# throughout. Pinning one transitive package and not the others would imply a
-# guarantee this script does not make.
+# Transitive dependencies (ml_dtypes under onnx, scipy and joblib under
+# scikit-learn, filelock and sympy under torch) are left to pip; only direct
+# dependencies of this code are pinned.
 if [ "$SKIP_MATPLOTLIB" = "0" ]; then
   PACKAGES+=("matplotlib==$MATPLOTLIB_VERSION")
 fi

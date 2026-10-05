@@ -1,40 +1,15 @@
 """
 Export a trained flat-MLP checkpoint to ONNX.
 
-Everything safety-related is imported from export_to_onnx rather than restated:
-the combined-tolerance verification constants, the seeded verification inputs,
-the denormal flush and its report. Only the graph differs. A second copy of any
-of that would be a second thing to keep correct, and the ONE thing this script
-must not do is put an unverified model on disk -- which is how seeds 3 and 4
-ended up as plausible-looking .onnx files nothing had ever checked.
+Uses export_to_onnx's tolerance, seeded inputs and denormal flush, and the same
+write-to-temp, verify, rename sequence. The exported graph takes the same
+inputs as the DeepSets model, (node_features [n, 99], global_features [1, 19]),
+and pads, flattens and (for sorted archs) sorts internally, so
+tools/compare_onnx_models.py and DeepSetsCore.cs's evaluator load it unchanged.
 
-THE EXPORTED GRAPH TAKES THE SAME INPUTS AS THE DEEPSETS MODEL.
-Inputs are (node_features [n, 99], global_features [1, 19]) with n dynamic, and
-the output is win_probability [1, 1] -- byte-for-byte the same signature
-DeepSetsValueNetwork.onnx presents. The padding, flattening and concatenation
-happen INSIDE the graph.
+    python export_flat_to_onnx.py --checkpoint best_model.pth --out flat.onnx
 
-Two things follow, and both are deliberate:
-
-  1. tools/compare_onnx_models.py works on these files with no changes, so the
-     throughput half of the ablation is measured by the same tool, on the same
-     real states, as everything else.
-
-  2. If either flat model ever earns a bot, it may not need a C# encoder at all:
-     an agent can feed it through the unchanged FeatureExtractor in
-     DeepSetsCore.cs. StateParserFlat exists as the reference definition of the
-     layout and as the training-time path, not necessarily as something that has
-     to be ported.
-
-It also means the padding cost is inside the measurement, which is correct. A
-real agent would pay it -- zeroing 12,672 floats on every evaluation is work the
-set encoder never does -- and excluding it would flatter the flat model against
-the one architecture it is being compared to.
-
-WHY VERIFICATION USES ITS OWN LOOP. export_to_onnx.verify_export drives a
-MockBatch through TributeValueNetwork's forward, which this model does not have.
-The tolerance, the seeding discipline and the failure message are the same; only
-the two lines that produce the reference value differ.
+--arch is read from the run_config.json beside the checkpoint if not given.
 """
 
 import argparse
@@ -61,22 +36,9 @@ from export_to_onnx import (
 class FlatONNXWrapper(torch.nn.Module):
     """(node_features, global_features) -> pad -> flatten -> concat -> MLP.
 
-    Slice first, then pad. F.pad with a negative amount is not a crop in ONNX,
-    so a state with more than MAX_NODES nodes has to be cut before the pad
-    amount is computed rather than relying on the pad to do it. No state in the
-    corpus reaches that branch -- 128 IS the measured maximum -- but a graph
-    that silently produced a wrong-shaped tensor on one would be worse than one
-    that truncates.
-
-    CONCAT WITH ZEROS RATHER THAN F.pad, because the exported graph is a
-    measurement instrument here. torch.nn.functional.pad on a 2-D tensor lowers
-    to Transpose -> Pad -> Transpose plus the index arithmetic to build the pads
-    vector: 29 nodes in the graph, against 17 for the concat, and measurably
-    slower -- 45.9 us against 43.3 us median at a 33-node state on this host.
-    Both produce identical output. Charging the flat model 6% for an avoidable
-    Transpose and then reporting the total as an architectural property would be
-    wrong, so the padding is written the efficient way and the remaining cost is
-    real.
+    Rows beyond MAX_NODES are sliced off before padding, since a negative pad
+    is not a crop in ONNX. Padding is a concat with zeros rather than F.pad,
+    which on a 2-D tensor lowers to Transpose -> Pad -> Transpose and is slower.
     """
 
     def __init__(self, flat_model, sort=False):
@@ -87,11 +49,8 @@ class FlatONNXWrapper(torch.nn.Module):
     def forward(self, x, u):
         x = x[:MAX_NODES]
         if self.sort:
-            # Sort BEFORE padding, matching StateParserFlat.pad_and_flatten.
-            # torch.argsort lowers to TopK, which opset 14 has; the key is
-            # computed in float64 so that distinct rows cannot collide and get
-            # ordered by TopK's tie-breaking, which is not guaranteed to agree
-            # with PyTorch's.
+            # Sort before padding, as in StateParserFlat.pad_and_flatten.
+            # argsort lowers to TopK, which opset 14 supports.
             x = x[torch.argsort(row_sort_key(x), dim=0)]
         pad_rows = MAX_NODES - x.shape[0]
         x = torch.cat([x, x.new_zeros(pad_rows, NODE_DIM)], dim=0)
@@ -100,37 +59,18 @@ class FlatONNXWrapper(torch.nn.Module):
 
 
 def verify_flat_export(base_model, onnx_filename, sort=False):
-    """Same contract as export_to_onnx.verify_export: combined tolerance
-    atol + rtol*|torch|, fixed seed, single-threaded session, nothing written
-    unless every node count passes.
+    """Same checks as export_to_onnx.verify_export, against pad_and_flatten.
 
-    The node counts swept include MAX_NODES and MAX_NODES+1. The last one is the
-    truncation branch, and it is checked against pad_and_flatten -- which
-    truncates the same way -- so the graph and the Python encoder agree even
-    where the corpus never goes.
-
-    EXPECT A LARGER RELATIVE ERROR HERE THAN export_to_onnx.py SEES, and do not
-    read it as a bug. That file's guidance is that a relative error near 1e-7 is
-    float32 rounding; it says so because its longest dot products are 256 terms.
-    This model's first layer sums 12,691 terms, and accumulated rounding grows
-    roughly as sqrt(n)*eps -- about sqrt(12691)*1.2e-7 = 1.3e-5 -- so a relative
-    error of ~1e-5 is the FLOOR here, not a warning sign. Measured on the
-    trained matched checkpoint: 1.105e-05 relative at n=128, which is ~90x
-    float32 epsilon and entirely expected.
-
-    The combined tolerance absorbs this because atol dominates wherever the
-    output is small, and the margins stay comfortable in practice -- the worst
-    observed was 8.583e-06 against a 2.586e-05 tolerance, 33% of budget. A real
-    graph bug (wrong pad, wrong flatten order, transposed weights) produces
-    errors of order 1, nowhere near either number.
+    The node counts include MAX_NODES + 1 to exercise truncation. Relative
+    errors near 1e-5 are expected rather than suspicious: the first layer sums
+    12,691 terms, so float32 rounding grows to about sqrt(12691) * 1.2e-7. A
+    graph error is of order 1.
     """
     import onnxruntime as ort
 
     base_model.eval()
 
-    # A LOCAL generator, not torch.manual_seed: this module gets imported, and
-    # a verification helper that quietly reseeds the global RNG would perturb
-    # whatever else in the process is drawing from it.
+    # A local generator, so importing this module does not reseed the global RNG.
     gen = torch.Generator()
     gen.manual_seed(VERIFY_SEED)
 
@@ -198,19 +138,15 @@ def export_flat_model(checkpoint_path, onnx_filename, arch, flush=True):
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    # train_flat.py trains a FlatGraphAdapter wrapping the MLP, so its
-    # state_dict keys are prefixed "flat.". Strip that: the adapter is training
-    # plumbing and nothing in the exported graph corresponds to it.
+    # train_flat.py saves a FlatGraphAdapter, whose keys carry a "flat." prefix.
     if any(k.startswith("flat.") for k in checkpoint):
         checkpoint = {k[len("flat."):]: v for k, v in checkpoint.items()
                       if k.startswith("flat.")}
 
     h1, h2, h3 = FLAT_CONFIGS[arch]
 
-    # base_model is the checkpoint EXACTLY as trained, and stays that way -- it
-    # is what verify_flat_export measures the exported graph against, so a
-    # flushed ONNX that still matches it to within tolerance is the statement we
-    # want out of the check.
+    # base_model stays unflushed, so verification also confirms that the flush
+    # changed no output.
     base_model = TributeValueNetworkFlat(in_dim=FLAT_DIM, h1=h1, h2=h2, h3=h3)
     base_model.load_state_dict(checkpoint)
     base_model.eval()
@@ -238,16 +174,13 @@ def export_flat_model(checkpoint_path, onnx_filename, arch, flush=True):
 
     wrapped_model = FlatONNXWrapper(export_source, sort=arch in SORTED_ARCHS)
 
-    # 15 nodes, matching export_to_onnx.py. The trace is over a dynamic axis, so
-    # the particular value only has to be a count the graph handles normally --
-    # not MAX_NODES, which would trace the pad at zero rows and could constant-
-    # fold the Pad away.
+    # 15 example nodes. Not MAX_NODES: tracing with no padding rows could fold
+    # the padding step away.
     dummy_x = torch.randn(15, NODE_DIM, dtype=torch.float32)
     dummy_u = torch.randn(1, GLOBAL_DIM, dtype=torch.float32)
 
-    # VERIFY BEFORE PUBLISHING: temp file in the same directory (so os.replace
-    # is atomic), pid-tagged (so concurrent exports cannot collide), renamed
-    # into place only once verification passes.
+    # Export to a pid-tagged temp file beside the target (so os.replace is
+    # atomic) and rename it into place only once verification passes.
     tmp_filename = f"{onnx_filename}.tmp{os.getpid()}"
 
     torch.onnx.export(
@@ -269,8 +202,7 @@ def export_flat_model(checkpoint_path, onnx_filename, arch, flush=True):
     try:
         verify_flat_export(base_model, tmp_filename, sort=arch in SORTED_ARCHS)
     except BaseException:
-        # BaseException, not Exception: a KeyboardInterrupt or a SLURM timeout
-        # mid-verification must not leave the temp file behind either.
+        # BaseException, so an interrupt or SLURM timeout also removes the temp file.
         try:
             os.remove(tmp_filename)
             print(f"Verification failed -- removed {tmp_filename}, "

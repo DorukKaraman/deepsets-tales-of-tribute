@@ -2,34 +2,20 @@
 Game-clustered paired comparison of checkpoints, from evaluate_checkpoints.py's
 --per-state-out file.
 
-WHY CLUSTERING IS NOT OPTIONAL HERE. A validation set of 20,138 states sounds
-like 20,138 observations. It is not: those states come from 76 games, about 265
-consecutive positions each, sharing a board and an outcome label. A test that
-treats them as independent understates the standard error by roughly the square
-root of the cluster size and will call almost anything significant. On the
-flat-MLP ablation the same accuracy difference came out at p = 2e-14 by
-sample-level McNemar and p = 0.086 clustered by game -- twelve orders of
-magnitude apart, and only the second one is defensible.
-
-So the unit of analysis is the GAME. For each pair of checkpoints this computes
-one difference per game (mean loss, and mean accuracy, of A minus B over that
-game's states), then a paired t-test over games. The samples are paired at the
-state level too, because evaluate_checkpoints.py scores every checkpoint on
-byte-identical samples in one pass -- which is what makes the per-game
-differences meaningful rather than two independent estimates subtracted.
-
-BONFERRONI. Comparing k checkpoints makes k(k-1)/2 comparisons, and each metric
-is tested separately, so the adjustment is over all of them. It is applied and
-shown rather than left to the reader.
+States from one game are highly correlated, so they are not independent
+observations: a state-level test understates the standard error by roughly the
+square root of the states per game. This takes the game as the unit. For each
+pair of checkpoints it computes one difference per game in mean loss and in mean
+accuracy, then a paired t-test over games, with a Bonferroni correction over
+every pair and metric tested.
 
     python tools/evaluate_checkpoints.py A.pth B.pth C.pth \\
         --data-dir "$SPLIT/val" --per-state-out /path/scores.csv.gz
     python tools/clustered_significance.py /path/scores.csv.gz
 
-Streaming and memory-light: it accumulates per-game sums, not per-state arrays.
-
-Read-only. Requires numpy; uses scipy for the t distribution when available and
-falls back to a normal approximation (noted in the output) when it is not.
+Accumulates per-game sums, so memory does not grow with the number of states.
+Read-only. Needs numpy; uses scipy for the t distribution if installed, and a
+normal approximation otherwise.
 """
 import argparse
 import gzip
@@ -40,8 +26,7 @@ from collections import defaultdict
 
 import numpy as np
 
-# Matches evaluate_checkpoints.EPS so losses recomputed here equal the ones it
-# reported. A different clip would silently shift every loss.
+# Same clip as evaluate_checkpoints.EPS, so recomputed losses match its output.
 EPS = 1e-7
 
 
@@ -50,11 +35,8 @@ def read_per_state(path):
     'n', and per model 'loss_sum' / 'correct'. One pass, no per-state storage."""
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt") as f:
-        # evaluate_checkpoints.py writes a '#' preamble naming the architecture
-        # each column was scored as -- 'matched' and 'matched_sorted' produce
-        # identically-named columns and identically-shaped weights, so the
-        # column name alone does not identify the model. Echo it, so a p-value
-        # is never reported without saying what was compared.
+        # evaluate_checkpoints.py writes a '#' preamble naming the arch each column was
+        # scored as, which the column name does not; echo it.
         preamble = []
         line = f.readline()
         while line.startswith("#"):
@@ -157,9 +139,8 @@ def main():
     print()
     print(f"  {'checkpoint':<32}{'loss':>10}{'accuracy':>11}")
     for k, name in enumerate(names):
-        # Weight per game by that game's size to recover the pooled figure
-        # evaluate_checkpoints.py prints, rather than the unweighted mean of
-        # per-game means used for the test.
+        # Weight by game size to recover evaluate_checkpoints.py's pooled figure; the
+        # test itself uses the unweighted per-game means.
         pooled_loss = float((loss[:, k] * sizes).sum() / sizes.sum())
         pooled_acc = float((acc[:, k] * sizes).sum() / sizes.sum())
         print(f"  {name:<32}{pooled_loss:>10.4f}{100 * pooled_acc:>10.2f}%")
@@ -192,9 +173,7 @@ def main():
                          min(1.0, p * n_tests), better_i, better_j, unit))
 
     def fmt_p(p):
-        """Never print a p-value as 0.0000. A t of -13.5 gives something like
-        1e-38, and rounding that to '0.0000' both loses the magnitude and reads
-        as a computation that failed."""
+        """Format a p-value without rounding a tiny one to 0.0000."""
         if p < 1e-9:
             return "<1e-9"
         if p < 1e-4:

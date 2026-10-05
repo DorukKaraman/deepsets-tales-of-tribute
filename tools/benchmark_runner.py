@@ -1,33 +1,17 @@
 """
-Process-parallel benchmark runner for ISMCTSBot (or any two bots) against
-GameRunner. Invoked by tools/benchmark.sh -- not usually run directly.
+Process-parallel local benchmark runner for two bots against GameRunner.
+Invoked by tools/benchmark.sh.
 
-DESIGN: one game per OS process (--runs 1 per invocation), pooled through a
-bounded set of concurrent subprocesses (--jobs). This is deliberately NOT
-"--jobs worker processes each playing --games/--jobs games" -- GameRunner's
-GameEndStatsCounter.ToString() only reports aggregate win/draw/other-factors
-counts per process, with no cross-tabulation of *which* reason produced *which*
-winner. With --runs 1, exactly one reason bucket and one winner line are set
-per process, so each game's outcome can be attributed exactly: a clean win/loss,
-or a win/loss caused by the opponent's (or own) exception/timeout/illegal move.
-That exact attribution is what lets error/timeout games be reported separately
-from real losses instead of silently inflating or deflating the win rate.
+One game per process (--runs 1), pooled across --jobs subprocesses.
+GameRunner's stats counter reports only per-process totals, so one game per
+process is what lets each outcome be attributed: a clean result, or one caused
+by an exception, timeout or illegal move, which is reported apart from losses.
 
-Every game gets its own distinct --seed. Half the games run bot-a as P1 (the
-first GameRunner argument), half run bot-b as P1 (bot order swapped) -- first-
-player advantage is real in this game, so an unswapped result isn't a clean
-measurement of anything.
-
-SOT_LOG and SOT_DUMP_DIR are stripped from every worker's environment
-regardless of what the caller's shell has set, so benchmark-scale runs never
-accidentally write gigabytes of debug logs/dumps.
-
-Every game is run with --enable-logs BOTH, which is a separate, always-cheap
-mechanism from SOT_LOG: the engine flushes each bot's AI.Log() messages to
-stdout once per completed move, tagged [PLAYER][hh:mm:ss:fff][turn][move].
-That's the only way to tell, after a game gets killed by the watchdog, whether
-it was still making steady turn progress (a legitimately long game) or had
-stalled (a hang) -- see parse_turn_progress().
+Every game has its own seed, and half the games swap seats, since first-player
+advantage is real. SOT_LOG and SOT_DUMP_DIR are stripped from each worker's
+environment. Games run with --enable-logs BOTH, whose per-move lines show
+whether a game killed by the watchdog was still progressing or had stalled
+(see parse_turn_progress).
 """
 import argparse
 import csv
@@ -47,10 +31,8 @@ DEFAULT_ONNX_PATH = os.path.join(REPO_ROOT, "models", "DeepSetsValueNetwork.onnx
 FAILURES_DIR = os.path.join(SCRIPT_DIR, "out", "failures")
 STDERR_HEAD_LINES = 30
 
-# The value network is trained exclusively on the competition patron pool --
-# benchmarking against GameRunner's engine-level default (a different
-# 9-patron pool including PSIJIC/HLAALU/RED_EAGLE, which the network has never
-# seen and which cannot occur in competition) would not be representative.
+# The network was trained on the competition patron pool, not on GameRunner's
+# default pool, which adds PSIJIC, HLAALU and RED_EAGLE.
 DEFAULT_PATRONS = "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA"
 
 CSV_HEADER = ["timestamp", "git_commit", "bot_a", "bot_b", "games", "timeout", "patrons",
@@ -63,9 +45,8 @@ LINE_PATTERNS = {
     "other": re.compile(r"Ends due to other factors:\s*(\d+)/(\d+)"),
 }
 
-# PREPARE_TIME_EXCEEDED isn't handled by GameEndStatsCounter.Add()'s switch and
-# throws, crashing the whole process with no stats block at all -- worth its
-# own diagnostic tag rather than lumping it in with a generic parse failure.
+# An engine without this fork's GameEndStatsCounter change throws on
+# PREPARE_TIME_EXCEEDED and prints no stats block; tag that case separately.
 PREPARE_TIME_MARKER = "PREPARE_TIME_EXCEEDED"
 
 
@@ -97,10 +78,8 @@ def git_commit(repo_root):
 
 
 def bots_dll_info(path):
-    """(size, mtime_iso, sha256) of the Bots.dll actually loaded by the runner,
-    or ("N/A", ...) if not given/found -- this is what makes a Debug-under-
-    Release mixup (or any other stale-artifact class of bug) visible after the
-    fact in tools/out/benchmark_log.csv, not just at pre-flight check time."""
+    """(size, mtime_iso, sha256) of the Bots.dll the runner loaded, or ("N/A", ...),
+    recorded in tools/out/benchmark_log.csv so a stale build is visible later."""
     if not path or not os.path.isfile(path):
         return "N/A (file not found)", "N/A", "N/A"
     size = os.path.getsize(path)
@@ -109,16 +88,9 @@ def bots_dll_info(path):
 
 
 def ensure_csv_header(csv_path, header):
-    """If csv_path already exists with a DIFFERENT stored header than `header`
-    (e.g. a column was just added), rewrite it in place: keep every existing
-    row, backfill any newly-added column with an explicit
-    'unknown (pre-<col>-column)' marker, and write the current header once at
-    the top. Without this, appending new rows under a changed CSV_HEADER
-    would silently produce a file whose stored header (row 1) no longer
-    matches its own data rows' column count/order -- exactly the kind of
-    thing that parses "fine" with a lenient reader and silently misaligns
-    columns with a strict one (pandas.read_csv, a fixed-position DictReader).
-    A no-op if the file doesn't exist yet or its header already matches."""
+    """If csv_path has a different header from `header`, rewrite it in place:
+    keep every row, fill new columns with 'unknown (pre-<col>-column)', and write
+    the current header. A no-op if the file is absent or already matches."""
     if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
         return
 
@@ -156,9 +128,8 @@ def wilson_interval(k, n, z=1.959963984540054):
 
 
 def write_failure_file(seed, swapped, returncode, stdout, stderr, note):
-    """Full stdout+stderr of a failed game, for offline inspection -- the console
-    summary only shows the first STDERR_HEAD_LINES, which is enough to identify
-    the exception but not necessarily the whole story."""
+    """Full stdout and stderr of a failed game, for offline inspection; the
+    console shows only the first STDERR_HEAD_LINES."""
     os.makedirs(FAILURES_DIR, exist_ok=True)
     path = os.path.join(FAILURES_DIR, f"{seed}_{swapped}.txt")
     with open(path, "w") as f:
@@ -178,13 +149,11 @@ TURN_LOG_PATTERN = re.compile(r"^\[(?:PLAYER1|PLAYER2)\]\[(\d{2}):(\d{2}):(\d{2}
 
 
 def parse_turn_progress(stdout, process_start, proc_timeout):
-    """Extract per-move progress lines to determine how far a killed game's turn
-    counter got, and whether it was still advancing near the kill or had stalled
-    well before it. Returns None if no such line was captured at all (e.g. killed
-    before the very first move completed).
+    """How far a killed game's turn counter got, and whether it was still
+    advancing near the kill or had stalled; None if no move line was captured.
 
-    process_start/proc_timeout let us reconstruct an approximate wall-clock kill
-    time to compare against the log's hh:mm:ss:fff timestamps, which carry no date."""
+    process_start and proc_timeout give an approximate kill time to compare with
+    the log's date-less hh:mm:ss:fff timestamps."""
     events = []
     for line in stdout.splitlines():
         m = TURN_LOG_PATTERN.match(line)
@@ -256,11 +225,8 @@ def run_one_game(binary, bot_a, bot_b, timeout_s, task, proc_timeout, patrons):
                                capture_output=True, text=True, timeout=proc_timeout)
         stdout, stderr, returncode = proc.stdout or "", proc.stderr or "", proc.returncode
     except subprocess.TimeoutExpired as e:
-        # e.stdout/e.stderr hold whatever was captured before the process was killed --
-        # but CPython does NOT decode this partial output when the timeout fires, even
-        # with text=True (decoding normally happens in Popen.communicate()'s regular
-        # return path, which a timeout bypasses). Coerce before it touches anything
-        # that assumes str, e.g. write_failure_file's text-mode f.write().
+        # On a timeout CPython leaves the captured output undecoded even with text=True,
+        # so decode it before anything treats it as str.
         stdout = e.stdout or ""
         stderr = e.stderr or ""
         stdout = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout
@@ -378,13 +344,9 @@ def main():
     if not os.path.isfile(args.binary) or not os.access(args.binary, os.X_OK):
         sys.exit(f"ERROR: binary not found or not executable: {args.binary}")
 
-    # Generous watchdog: engine-level timeouts (TURN_TIMEOUT etc.) already bound
-    # a single move's duration, not the whole game's -- prestige-matching drives
-    # ToT games past the 40 threshold toward the 80 cap when both players are
-    # strong, so a legitimately long head-to-head game can run for many minutes.
-    # *60 (600s at --timeout 10) was cutting those off; *180 (1800s) gives real
-    # long games room while still catching genuine hangs, which parse_turn_progress
-    # distinguishes from legitimately-long games regardless of where this lands.
+    # Watchdog of 180x the engine timeout. Engine timeouts bound a move, not a game,
+    # and two strong players can push a game to the 80-prestige cap over many
+    # minutes; parse_turn_progress separates long games from hangs.
     proc_timeout = max(1800, args.timeout * 180)
 
     if args.repeat_seed is not None:
@@ -440,10 +402,8 @@ def main():
             try:
                 results.append(fut.result())
             except Exception as e:
-                # A single bad game must never abort the whole benchmark -- record it
-                # as its own failure (same shape as every other failure path) and keep
-                # going, so a 150-game run still reaches the RESULTS block even if one
-                # game's harness code blows up.
+                # A harness error in one game is recorded as that game's failure rather than
+                # aborting the run.
                 results.append({
                     "seed": task["seed"], "swapped": task["swapped"], "ok": False,
                     "category": None, "kind": "harness_exception",
@@ -457,10 +417,8 @@ def main():
     failed = [r for r in results if not r["ok"]]
     ok = [r for r in results if r["ok"]]
 
-    # "incomplete (too long)" is a killed game that was still advancing at a steady
-    # pace when the watchdog hit -- almost certainly a legitimately long game, not
-    # a bug. Everything else in `failed` (stalled/hung, process errors, unhandled
-    # harness exceptions) is a real failure with no data, worth investigating.
+    # "incomplete (too long)" is a killed game that was still advancing steadily,
+    # almost certainly just long. Everything else in `failed` is a real failure.
     incomplete_too_long = [r for r in failed if r.get("kind") == "timeout_incomplete"]
     genuinely_failed = [r for r in failed if r.get("kind") != "timeout_incomplete"]
 

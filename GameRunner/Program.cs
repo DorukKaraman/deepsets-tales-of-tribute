@@ -325,14 +325,11 @@ void RunSingleThreaded(
             bot2Wrapper!.FinishGame(endReason);
         }
 
-        // One machine-readable line per game, with the EXACT GameEndReason.
-        // GameEndStatsCounter's aggregate (below) buckets TURN_TIMEOUT,
-        // INCORRECT_MOVE, BOT_EXCEPTION, INTERNAL_ERROR and both
-        // PATRON_SELECTION_* reasons together as "other factors", which is
-        // fine for a self-play data run but not for a benchmark: at a 2s
-        // per-turn budget a game lost to a timeout is not a game lost to
-        // play, and the two have to be reported separately. Parsed by
-        // tools/benchmark_cluster.py (GAME_END_REASON_PATTERN).
+        // One machine-readable line per game with the exact GameEndReason, parsed by
+        // tools/benchmark_cluster.py (GAME_END_REASON_PATTERN). GameEndStatsCounter's
+        // aggregate below lumps TURN_TIMEOUT, INCORRECT_MOVE, BOT_EXCEPTION,
+        // INTERNAL_ERROR and both PATRON_SELECTION_* reasons into "other factors", but a
+        // benchmark must report a game lost to a timeout separately from one lost in play.
         Console.WriteLine($"GAME_END_REASON: {endReason.Reason} WINNER: {endReason.Winner}");
 
         if (endReason.Reason == ScriptsOfTribute.Board.GameEndReason.BOT_EXCEPTION)
@@ -604,12 +601,10 @@ public class SafeChoiceConverter : JsonConverter<SerializedChoice>
     }
 }
 
-// Wraps an inner bot to intercept every Play() call and buffer the
-// pre-move GameState + chosen move, then dump the buffer to a
-// process/worker/matchup-sharded gzip JSONL file at game end -- one JSON
-// object per line, tagged with a unique game_id and this wrapper's fixed
-// player identity so downstream training can pool records from both
-// bots (and both PlayerID perspectives) in a matchup.
+// Wraps an inner bot, buffers the pre-move GameState and chosen move on every
+// Play() call, and at game end writes the buffer to a process/worker/matchup-sharded
+// gzip JSONL file, one object per line, tagged with a unique game_id and this
+// wrapper's player identity so training can pool both bots' records.
 public class DataLoggingWrapper : AI
 {
     private readonly AI _innerBot;
@@ -619,14 +614,11 @@ public class DataLoggingWrapper : AI
     private readonly JsonSerializerOptions _jsonOptions;
     private string _currentGameId = "";
 
-    // Clean, well-defined win/loss outcomes only. Everything else
-    // (INCORRECT_MOVE, TURN_TIMEOUT, PATRON_SELECTION_TIMEOUT,
-    // PATRON_SELECTION_FAILURE, TURN_LIMIT_EXCEEDED, INTERNAL_ERROR,
-    // BOT_EXCEPTION, PREPARE_TIME_EXCEEDED) either has no genuine winner or
-    // reflects a malfunction rather than a strategic outcome, so it must not
-    // be used as a training label. An allowlist (not a denylist of error
-    // reasons) means a future GameEndReason value is excluded by default
-    // instead of silently slipping through as "clean".
+    // Clean win/loss outcomes only. The other reasons (INCORRECT_MOVE, TURN_TIMEOUT,
+    // PATRON_SELECTION_TIMEOUT, PATRON_SELECTION_FAILURE, TURN_LIMIT_EXCEEDED,
+    // INTERNAL_ERROR, BOT_EXCEPTION, PREPARE_TIME_EXCEEDED) have no real winner or
+    // reflect a malfunction, so they are not training labels. An allowlist excludes
+    // any future GameEndReason by default.
     private static readonly HashSet<GameEndReason> CleanEndReasons = new()
     {
         GameEndReason.PRESTIGE_OVER_40_NOT_MATCHED,
@@ -658,9 +650,8 @@ public class DataLoggingWrapper : AI
         return chosenMove;
     }
 
-    // Writes the buffered turns with this wrapper's own perspective's
-    // outcome if the game ended cleanly; otherwise discards them. Either way
-    // the buffer is empty afterward, ready for the next game.
+    // Writes the buffered turns with this wrapper's outcome if the game ended
+    // cleanly, otherwise discards them; the buffer is empty afterwards.
     public void FinishGame(ScriptsOfTribute.Board.EndGameState endState)
     {
         if (CleanEndReasons.Contains(endState.Reason))
@@ -671,10 +662,8 @@ public class DataLoggingWrapper : AI
 
     public void DiscardBuffer() => _turnLogs.Clear();
 
-    // Opens the file in Append mode and wraps a fresh GZipStream per call,
-    // producing concatenated gzip members rather than one continuous
-    // stream -- Python's gzip module reads these transparently as one
-    // logical stream (verified empirically, not just assumed).
+    // Appends a fresh GZipStream per call, producing concatenated gzip members,
+    // which Python's gzip module reads as one stream.
     public void FlushToFile(bool didWin)
     {
         int outcome = didWin ? 1 : 0;

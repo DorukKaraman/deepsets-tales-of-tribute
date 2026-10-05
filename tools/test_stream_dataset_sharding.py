@@ -1,32 +1,18 @@
 """
-Every shard is read exactly once per epoch, at every worker count.
+Check that SakkirinaStreamDataset reads every shard exactly once per epoch, at
+every worker count.
 
-WHY THIS TEST EXISTS. training/stream_dataset.py used to shuffle the shard list
-and then slice it per worker:
+Partitioning has to happen before shuffling. Each DataLoader worker has its own
+RNG, so shuffling the full list and then slicing gives each worker a different
+permutation, and the slices stop being a partition. That only shows with two or
+more workers, so the test runs 1, 2, 4 and 7, and confirms that shuffle-then-
+slice does fail, so that the test can catch it.
 
-    shards = list(self.shards)
-    random.shuffle(shards)
-    worker_shards = shards[worker_id::num_workers]
-
-Each DataLoader worker is a separate process with its own `random` state, so
-every worker shuffled into a different permutation and then took its own stride
-from it. Slices of DIFFERENT permutations are not a partition: some shards were
-read by several workers in one epoch, others by none. Nothing failed, nothing
-warned, and the only visible symptom was a record count that nobody was
-checking.
-
-The failure is invisible at num_workers=0 or 1 (no sharding happens), which is
-why it survived: the smoke tests ran single-process. It needs >= 2 workers and
-an actual count of what came out.
-
-Runs in about a second on synthetic shards -- one gzipped line per record, a few
-records each. The bug is in shard SELECTION, so the contents are irrelevant and
-decompressing the real 9.3 GB corpus would only make the test too slow to run.
+Uses small synthetic shards, since only shard selection matters.
 
     python tools/test_stream_dataset_sharding.py
 
-Exits nonzero on any failure. Read-only apart from a temp directory it creates
-and removes.
+Exits nonzero on any failure. Writes only to a temp directory it removes.
 """
 import gzip
 import json
@@ -47,7 +33,7 @@ except ImportError as e:  # pragma: no cover - environment problem, not logic
              f"       Activate the venv built by scripts/setup_python_env.sh first.")
 
 WORKER_COUNTS = [1, 2, 4, 7]
-N_SHARDS = 13          # deliberately coprime with most worker counts
+N_SHARDS = 13          # coprime with most worker counts
 RECORDS_PER_SHARD = 5
 
 
@@ -74,12 +60,10 @@ def make_corpus(root):
 
 
 class ShardNameDataset(SakkirinaStreamDataset):
-    """Yields the shard each worker selected instead of its records.
+    """Yields the shard each worker selects, rather than its records.
 
-    Inherits __iter__'s selection logic by calling it? No -- __iter__ also
-    parses. This duplicates ONLY the four lines of selection logic, read back
-    out of the real class at runtime via the same attributes, so the test
-    tracks whatever stream_dataset currently does rather than a frozen copy.
+    Implements the selection both ways: "old" shuffles then slices, "new" slices
+    then shuffles. stream_records below exercises the real class.
     """
 
     def __init__(self, data_dir, strategy):
@@ -104,10 +88,9 @@ class ShardNameDataset(SakkirinaStreamDataset):
 
 
 def worker_init_fn(worker_id):
-    """Matches train_local.worker_init_fn: seeds each worker's `random` from
-    torch's per-worker seed. This is what gives each worker a DIFFERENT
-    permutation under the old code, so the test must reproduce it or the bug
-    disappears."""
+    """Matches train_local.worker_init_fn: seeds each worker's `random` from its
+    torch seed. Without per-worker seeds the shuffle-then-slice failure would not
+    reproduce."""
     import random
     import numpy as np
     seed = torch.initial_seed() % 2 ** 32
@@ -173,13 +156,12 @@ def main():
         print(f"{N_SHARDS} synthetic shards, {expected} records, "
               f"worker counts {WORKER_COUNTS}\n")
 
-        # 1. The OLD strategy must FAIL, or this test proves nothing: a test
-        #    that passes on the broken code would not have caught the bug.
+        # 1. Shuffle-then-slice must fail, or the test could not catch it.
         print("  OLD strategy (shuffle then slice) -- expected to FAIL:")
         old_failures = check("old", root, expected, verbose=True)
         print()
 
-        # 2. The CURRENT strategy must pass, both on shard selection...
+        # 2. Slice-then-shuffle must cover every shard once on selection...
         print("  CURRENT strategy (slice then shuffle) -- shard coverage:")
         new_failures = check("new", root, expected, verbose=True)
         print()

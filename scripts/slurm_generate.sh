@@ -1,49 +1,35 @@
 #!/usr/bin/env bash
-# SLURM array template for cluster-scale self-play data generation. Default
-# bot is SakkirinaGenNeural, our current best agent (68% vs SakkirinaSolo) --
-# see BOT_NAME below to generate from a different bot instead (e.g.
-# SakkirinaGen, the 2025 winner's heuristic, for the earlier dataset).
+# SLURM array template for cluster self-play data generation. The default bot is
+# SakkirinaGenNeural; set BOT_NAME below for another, e.g. SakkirinaGen (the 2025
+# winner's heuristic) for the earlier dataset.
 #
-# DESIGN: 32 independent single-core array tasks, NOT one 32-process job.
-# Each task is its own OS process (tools/generate_data.sh --task-id N forces
-# --jobs 1), writing to its own task_NN/ subdirectory with a seed range that
-# can never collide with any other task's. This is deliberately simpler than
-# a single multi-process SLURM job: if task 17 dies, only task 17 needs
-# re-running (SLURM's own array retry, or a manual re-submit of just that
-# index), and the resumability tools/generate_data.py already has means
-# re-running the same array a second time skips every task that already
-# finished.
+# 32 independent single-core array tasks rather than one 32-process job. Each
+# task is its own process (tools/generate_data.sh --task-id N forces --jobs 1)
+# with its own task_NN/ subdirectory and a seed range no other task uses. A
+# failed task is rerun on its own, and rerunning the array skips finished tasks
+# through tools/generate_data.py's resume markers.
 #
-# SETUP (do this BEFORE sbatch-ing, not after):
+# Setup, before sbatch:
 #   1. Build once, on the login node:
 #        cd CHANGE_ME_REPO_ROOT
 #        dotnet build Bots/Bots.csproj -c Release
 #        dotnet build GameRunner/GameRunner.csproj -c Release
-#   2. Create the logs directory yourself -- SLURM does NOT create the
-#      directory for #SBATCH --output/--error; if it doesn't already exist
-#      when this is submitted, every task fails immediately before the
-#      script body even runs:
+#   2. Create the logs directory. SLURM does not create the directory for
+#      #SBATCH --output/--error, and every task fails before the script runs if
+#      it is missing:
 #        mkdir -p CHANGE_ME_REPO_ROOT/logs
-#   3. Replace every remaining CHANGE_ME_* placeholder below (partition,
-#      account, repo root, games-per-task). The script refuses to run (see
-#      the guard below) if any are left unedited. OUT_DIR, SEED_BASE, BOT_NAME
-#      and --time already have real defaults for this (the second,
-#      SakkirinaGenNeural) cluster run -- edit them too if you want different
-#      ones, but they won't block submission if left as-is.
+#   3. Replace every remaining CHANGE_ME_* placeholder below (partition, account,
+#      repo root, games per task); the guard below refuses to run otherwise.
+#      OUT_DIR, SEED_BASE, BOT_NAME and --time have defaults for the
+#      SakkirinaGenNeural run.
 #   4. Submit:
 #        sbatch scripts/slurm_generate.sh
 #
-# Total games generated = 32 * GAMES_PER_TASK. Pick GAMES_PER_TASK and --time
-# together: tools/generate_data.sh runs the bot at full strength (--timeout
-# 10, no speed shortcuts), so budget generously per game -- see the per-game
-# peak-memory/wall-clock measurement notes from the local dry run before
-# picking a --time value, rather than guessing. SakkirinaGenNeural runs ONNX
-# inference on every rollout, so it is noticeably slower than SakkirinaGen was
-# (~79.6s/game measured locally vs. SakkirinaGen's ~48s on cluster hardware --
-# expect somewhere in that range, not directly comparable since local and
-# cluster hardware differ). At the default GAMES_PER_TASK below: ~6000 games /
-# 32 tasks * ~80s/game is roughly 4-5 hours -- comfortably inside the 10-hour
-# --time below, not up against it.
+# Total games = 32 * GAMES_PER_TASK; choose it together with --time.
+# tools/generate_data.sh plays at full strength (--timeout 10). SakkirinaGenNeural
+# runs ONNX inference on every rollout and took ~79.6s/game locally, against
+# SakkirinaGen's ~48s on cluster hardware. At ~6000 games, 32 tasks at ~80s/game
+# take roughly 4-5 hours, inside the 10-hour --time below.
 
 #SBATCH --job-name=sakgen
 #SBATCH --partition=CHANGE_ME_PARTITION
@@ -61,35 +47,22 @@ set -euo pipefail
 REPO_ROOT="CHANGE_ME_REPO_ROOT"          # e.g. /home/you/tot/deepsets-tales-of-tribute
 GAMES_PER_TASK="CHANGE_ME_GAMES_PER_TASK"  # integer, e.g. 300 -- total games = 32 * this
 
-# --- Have real defaults for this (second, SakkirinaGenNeural) run -- edit if
-# you want different ones, but submission won't be blocked if you don't ---
-OUT_DIR="/hpcwork/yfl79180/tot_data_neural"  # separate from the first run's
-                                              # /hpcwork/yfl79180/tot_data, so
-                                              # the two datasets cannot mix --
-                                              # shard filenames already embed
-                                              # the bot name too, so both are
-                                              # self-describing either way
-SEED_BASE="20260807"                     # the first (SakkirinaGen) run used
-                                          # 20260803 -- must differ, or this
-                                          # run would just regenerate
-                                          # identical games. Fixed across the
-                                          # WHOLE array (tools/generate_data.sh
-                                          # adds task_id*1000000 per task); do
-                                          # not use a time-derived value here,
-                                          # or a re-submitted/retried task
-                                          # could silently regenerate a
-                                          # different seed range than before
-BOT_NAME="SakkirinaGenNeural"            # our current best agent; the ONNX
-                                          # model it needs is pinned below via
-                                          # EXPECT_ONNX_SHA256, not just
-                                          # assumed present
+# --- Defaults for the SakkirinaGenNeural run; editing is optional ---
+OUT_DIR="/hpcwork/yfl79180/tot_data_neural"  # apart from the SakkirinaGen run's
+                                              # /hpcwork/yfl79180/tot_data
+SEED_BASE="20260807"                     # the SakkirinaGen run used 20260803;
+                                          # must differ or the games repeat.
+                                          # generate_data.sh adds task_id*1000000
+                                          # per task. Never time-derived, so a
+                                          # retried task keeps its seed range
+BOT_NAME="SakkirinaGenNeural"            # its ONNX model is pinned below via
+                                          # EXPECT_ONNX_SHA256
 EXPECT_ONNX_SHA256="71d999201b57974477f9ef1b57eb681a4ce5e54aea52293766378f93b8077fd6"
 # ----------------------------------
 
-# Refuse to run with an unedited placeholder rather than fail confusingly
-# later (a non-numeric GAMES_PER_TASK, or a #SBATCH directive SLURM already
-# rejected at submission time -- some placeholders can't even reach this
-# point, but the plain shell variables below can).
+# Refuse to run with an unedited placeholder instead of failing later (e.g. on a
+# non-numeric GAMES_PER_TASK). Placeholders in #SBATCH lines are rejected by
+# sbatch itself; this catches the shell variables.
 for name in REPO_ROOT GAMES_PER_TASK; do
   value="${!name}"
   if [[ "$value" == CHANGE_ME_* ]]; then

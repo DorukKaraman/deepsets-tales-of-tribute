@@ -1,24 +1,16 @@
 """
 Game-aware train/val split for a tools/generate_data.py output directory.
 
-States from one game must never appear in both splits -- a game-level train/val
-leak would let the model partially memorize that specific game's trajectory
-rather than genuinely generalizing, and the leak wouldn't show up as an
-obviously-too-good val loss the way a naive record-level split's leak might
-(consecutive states within a game are highly correlated, so even a few leaked
-games can meaningfully inflate val metrics without looking anomalous).
-
-Splits by game_id, not by record: pass 1 streams every shard to collect each
-game_id's record count, partitions the SET of game_ids 90/10, then pass 2
-re-streams every shard writing each record verbatim into whichever of
-train/*.jsonl.gz or val/*.jsonl.gz matches its game_id -- one output shard per
-input shard per split, so record order/content within a shard is untouched,
-just partitioned. A third, independent pass re-reads the WRITTEN output and
-asserts zero game_id overlap, rather than trusting the in-memory split.
+States within a game are highly correlated, so a record-level split would leak
+games into val and inflate val metrics without looking anomalous. This splits by
+game_id instead. Pass 1 counts records per game_id and partitions the game_ids
+90/10. Pass 2 copies each record verbatim into train/ or val/, one output shard
+per input shard per split, preserving order within a shard. Pass 3 re-reads the
+written output and asserts that no game_id appears in both splits.
 
 Usage:
-    python tools/split_dataset.py /tmp/gen50 /tmp/gen50_split
-    python tools/split_dataset.py /tmp/gen50 /tmp/gen50_split --val-fraction 0.1 --seed 0
+    python tools/split_dataset.py $DATA/gen50 $DATA/gen50_split
+    python tools/split_dataset.py $DATA/gen50 $DATA/gen50_split --val-fraction 0.1 --seed 0
 """
 import argparse
 import glob
@@ -90,9 +82,8 @@ def main():
     written_val_records = 0
     for shard in shards:
         rel = os.path.relpath(shard, args.data_dir)
-        # Flatten the relative path into one filename component so
-        # job_0000/x.jsonl.gz and job_0001/x.jsonl.gz (identical basenames
-        # across jobs) can't collide once written into one flat directory.
+        # Flatten the relative path into one filename so job_0000/x.jsonl.gz and
+        # job_0001/x.jsonl.gz do not collide in one flat directory.
         flat_name = rel.replace(os.sep, "__")
 
         train_lines = []

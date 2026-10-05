@@ -1,44 +1,22 @@
 """
-Parity test for the flat encoder's ASSEMBLY step, on real logged states.
+Check the flat encoder's assembly on real logged states.
 
-WHAT IT DOES AND DOES NOT COVER. There is no C# side here yet and no
-reimplemented feature code to check: training/StateParserFlat.py takes its node
-matrix straight from StateParser.json_to_pyg_graph and its globals from the same
-object, so the two encoders agree card-for-card by construction. What is new,
-and therefore what can be wrong, is the assembly -- pad to MAX_NODES rows,
-flatten, concatenate the 19 globals -- and the three separate places that
-assembly happens:
+StateParserFlat takes its node matrix from StateParser.json_to_pyg_graph, so the
+card features cannot differ; what can go wrong is the assembly (pad to
+MAX_NODES, flatten, append the globals), which has three implementations:
 
-  1. pad_and_flatten          one state, the reference definition
-  2. batch_pad_and_flatten    a PyG batch, the training path (to_dense_batch)
-  3. FlatONNXWrapper          the exported graph, in traced ONNX ops
+  1. pad_and_flatten          one state, the reference
+  2. batch_pad_and_flatten    a PyG batch, the training path
+  3. FlatONNXWrapper          the exported graph
 
-The canonical-order arm (matched_sorted) adds a fourth thing that can be
-wrong and is checked here too: the sort key must SEPARATE distinct rows. Two
-distinct rows sharing a key are ordered by argsort's internal tie-breaking,
-which PyTorch and onnxruntime need not resolve the same way, so a collision
-surfaces as a torch/ONNX mismatch on some states and not others.
+This checks 1 against StateParser and 2 against 1; export_flat_to_onnx.py checks
+3 against 1 on every export. Real states are used because random tensors have
+no zero rows, and padding is where zeros matter.
 
-All three must produce the same vector or the model is trained on one layout
-and served on another -- a failure that would show up as an inexplicably weak
-baseline and would be read as evidence about architecture. #3 is checked
-against #1 inside export_flat_to_onnx.verify_flat_export on every export, so it
-cannot reach disk unverified. This script checks #1 against the underlying
-StateParser output, and #2 against #1, on real states rather than random
-tensors -- random tensors have no zero rows, and the padding is precisely where
-zeros matter.
-
-Checks per state:
-  - every node row lands at its own index, in json_to_pyg_graph's emission order
-  - rows past the node count are exactly zero
-  - the 19 globals occupy the final slots, in order
-  - nothing else is nonzero
-  - the batched path is bit-identical to the per-state path
-  - batches mixing different node counts pad each member independently
-
-When this script is run after a C# FlatFeatureExtractor exists, it should be
-extended to diff against it the way tools/verify_parity.py does -- by invoking
-the real C# method through a console tool, not by reimplementing it here.
+For the sorted arm it also checks that the sort key separates every distinct
+row (otherwise argsort's tie-breaking decides, and PyTorch and onnxruntime may
+disagree), that location stays the primary key, that the result does not
+depend on row order, and that the batched path matches.
 
 Read-only. Usage:
     python tools/verify_flat_parity.py --data-dir /path/to/data --num-samples 300
@@ -68,18 +46,9 @@ except ImportError as e:  # pragma: no cover - environment problem, not logic
 
 
 def sample_states(data_dir, num_samples, seed=0):
-    """Spread the sample across shards AND across each shard.
-
-    Consecutive records come from one game and share a board, so the first N
-    records of one shard would exercise one deck and a narrow band of node
-    counts -- which is the one thing this test must not do, since the padding
-    region is exactly what varies with the node count.
-
-    Reservoir sampling per shard rather than a fixed stride: shards here range
-    from a few hundred records to 25,000, and any fixed stride is either too
-    coarse for the small ones (returning almost nothing) or too fine for the
-    large ones (returning only the head). A reservoir spreads over the whole
-    shard at any length, in one pass, holding at most per_shard states.
+    """Sample across shards and across each shard, so the sample covers many
+    node counts; consecutive records share a game and a board. Reservoir sampling
+    per shard works at any shard length, in one pass.
     """
     shards = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl.gz"), recursive=True))
     if not shards:
@@ -128,8 +97,7 @@ def check_layout(state):
         bad = (node_part[:kept] != x[:kept]).any(dim=1).nonzero().flatten().tolist()
         problems.append(f"node rows differ at indices {bad[:5]} (n={n})")
 
-    # Everything past the node count is padding and must be exactly zero --
-    # not merely small. A nonzero there would be read by the model as a card.
+    # Padding must be exactly zero; a nonzero value would read as a card.
     if kept < MAX_NODES and node_part[kept:].abs().sum().item() != 0.0:
         nz = int((node_part[kept:] != 0).sum().item())
         problems.append(f"{nz} nonzero values in the padding region (n={n})")
@@ -177,9 +145,8 @@ def main():
     print(f"   node counts seen: min {min(node_counts)}, median "
           f"{sorted(node_counts)[len(node_counts) // 2]}, max {max(node_counts)}")
 
-    # 2. The training path against the reference, on batches that deliberately
-    # mix node counts -- a padding bug that pads every member to the batch's
-    # own maximum instead of MAX_NODES is invisible on a uniform batch.
+    # 2. The training path against the reference, on batches with mixed node
+    # counts, which expose padding to the batch's own maximum instead of MAX_NODES.
     graphs = [json_to_pyg_graph(s) for s in states]
     for g in graphs:
         g.y = torch.zeros(1, 1)
@@ -212,14 +179,8 @@ def main():
     print(f"   (first batch spans {spread} distinct node count(s) -- a batch of one "
           f"count would not test padding)")
 
-    # 3. The canonical-order path (matched_sorted). Three things have to hold,
-    #    and each fails in a different, silent way:
-    #      - the sort key must SEPARATE distinct rows, or argsort's tie-breaking
-    #        decides the order and PyTorch and onnxruntime need not agree;
-    #      - the flattened vector must be invariant to row order, which is the
-    #        entire point of the arm;
-    #      - the batched training path must agree with the per-state reference,
-    #        as in check 2.
+    # 3. The sorted arm: the key must separate distinct rows, the result must not
+    #    depend on row order, and the batched path must match the reference.
     sort_failures = 0
 
     distinct = {tuple(r.tolist()) for g in graphs for r in g.x}
@@ -236,8 +197,7 @@ def main():
         print(f"       Raise SORT_KEY_LOC_SCALE, or reseed SORT_KEY_SEED, in "
               f"training/StateParserFlat.py.")
 
-    # location must remain the PRIMARY key, or the flattened vector loses its
-    # block structure and the sorted arm stops being comparable to the others.
+    # Location must stay the primary key, or the vector loses its block structure.
     loc_ids = (R[:, NODE_DIM - 9:].to(torch.float64) @ torch.arange(9, dtype=torch.float64))
     bands = torch.floor(keys / SORT_KEY_LOC_SCALE)
     if not torch.equal(bands, loc_ids):

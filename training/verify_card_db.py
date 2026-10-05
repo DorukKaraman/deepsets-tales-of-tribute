@@ -1,17 +1,16 @@
 """
-Read-only audit of card_db.py against its source of truth, Engine/cards.json.
+Read-only audit of card_db.py against Engine/cards.json.
 
-card_db.py supplies 76 of the value network's 101 node-feature dimensions and
-is the SOLE source of truth for card effects (the logged "Effects" field in
-game states is always empty, so there is no independent cross-check). This
-script re-derives card_db.py's parsing from scratch (a verbatim copy of
-generate_db.py's WORD_TO_INDEX / parse_effect_text, not an import of
-generate_db.py itself, since importing that module would re-run its top-level
-code and overwrite card_db.py) and reports every place the parse can silently
-drop information.
+card_db.py supplies 76 of the 99 node-feature dimensions and is the only source
+of card effects, since the logged "Effects" field is always empty. This
+re-derives the parse independently and reports every place it can drop
+information.
 
-Does not modify card_db.py, generate_db.py, or cards.json. Writes only to
-tools/out/unknown_effect_tokens.txt and tools/out/card_db_roundtrip_mismatches.txt.
+The parsing logic is copied from generate_db.py rather than imported, because
+importing that module runs its top-level code and overwrites card_db.py.
+
+Writes only to tools/out/unknown_effect_tokens.txt and
+tools/out/card_db_roundtrip_mismatches.txt.
 """
 import json
 import re

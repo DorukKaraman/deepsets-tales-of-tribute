@@ -1,6 +1,6 @@
 {
   "name": "legacy_paper_benchmark",
-  "description": "The original hardcoded 10-matchup benchmark, reproduced exactly. Same order, same 400 games/matchup, same --timeout 10, same seed base -- so task ids, seeds and result directory names are identical to the pre-config harness and an in-flight run resumes across the change. This is the config tools/benchmark_cluster.sh defaults to. Matchups 10-11 (task ids 4000-4799) were appended at the end: they were run in August 2026 alongside the original ten but never committed. Do not reorder it; extend only at the end.",
+  "description": "12 matchups x 400 games. Matchups 0-9 reproduce the original hardcoded 10-matchup benchmark exactly: same order, 400 games/matchup, --timeout 10, same seed base, so their task ids, seeds and result directory names match the pre-config harness. Matchups 10-11 (task ids 4000-4799), run in August 2026 alongside the first ten, follow at the end. This is the config tools/benchmark_cluster.sh defaults to. Do not reorder it; extend only at the end.",
   "seed_base": 20260808,
   "patrons": "ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA",
   "allowed_onnx_sha256": ["86e0f9a8891915bf5f151afc43c3ef98b50334d9967d79eac0ddc0b14706a915"],

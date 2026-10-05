@@ -10,28 +10,24 @@ using ScriptsOfTribute.Board.Cards;
 namespace Bots;
 
 
-// Copy of SakkirinaNeural.cs (our current best agent) for cluster data
-// generation. One addition only: the exploration-sampling mechanism from
-// SakkirinaGen.cs, ported exactly (see ENABLE_EXPLORATION/EXPLORATION_TURNS/
-// EXPLORATION_TEMPERATURE and Node.SampleChildByVisits below), so self-play
-// between two near-deterministic instances of this search visits more of the
-// state space instead of replaying the same line every game. Same search,
-// same time budget, same neural evaluator -- do not restructure the search
-// here; if it needs fixing, fix it in SakkirinaNeural.cs (or SakkirinaSolo.cs
-// for the underlying search) first.
+// Data-generation agent: SakkirinaSolo's search with the DeepSets value network
+// as leaf evaluator, plus the exploration sampling of SakkirinaGen.cs
+// (ENABLE_EXPLORATION/EXPLORATION_TURNS/EXPLORATION_TEMPERATURE and
+// Node.SampleChildByVisits below), so that self-play between two
+// near-deterministic instances visits more of the state space instead of
+// replaying the same line every game.
 public class SakkirinaGenNeural : AI
 {
-    // For the first EXPLORATION_TURNS turns, sample the root move
-    // proportional to visit count instead of taking BestChild(). After that,
-    // behaves exactly like stock SakkirinaNeural.
+    // For the first EXPLORATION_TURNS turns, sample the root move in proportion to
+    // visit count instead of taking BestChild(); afterwards, play as without
+    // exploration.
     const bool ENABLE_EXPLORATION = true;
     const int EXPLORATION_TURNS = 6;
 
-    // Each child's weight is visits^(1/EXPLORATION_TEMPERATURE). At 1.0 this
-    // is raw visit-proportional sampling (a no-op vs. the previous
-    // behaviour); raising it flattens the distribution toward uniform, for
-    // when root visit splits are too concentrated (e.g. [70469, 15, 15]) for
-    // proportional sampling to meaningfully diverge from BestChild().
+    // Each child's weight is visits^(1/EXPLORATION_TEMPERATURE). At 1.0 this is
+    // raw visit-proportional sampling; raising it flattens the distribution towards
+    // uniform, for root visit splits too concentrated (e.g. [70469, 15, 15]) to
+    // diverge from BestChild().
     const double EXPLORATION_TEMPERATURE = 1.0;
 
     static bool CheckRandomTransition(SeededGameState gameState, SeededGameState newGameState)
@@ -232,19 +228,14 @@ public class SakkirinaGenNeural : AI
             return this.childs[selected];
         }
 
-        // Exploration: sample a root child proportional to
-        // visits^(1/EXPLORATION_TEMPERATURE) instead of always taking the
-        // argmax. Falls back to BestChild() if no visits have been recorded
-        // yet (shouldn't happen given the search always runs at least one
-        // iteration, but a zero-visit weighted draw has nothing to sample
-        // from).
+        // Exploration: sample a root child in proportion to
+        // visits^(1/EXPLORATION_TEMPERATURE) instead of taking the argmax. Falls back to
+        // BestChild() when no visits are recorded, since a zero-visit weighted draw has
+        // nothing to sample from.
         //
-        // T=1.0 uses the exact same integer arithmetic as the original
-        // raw-visits sampling (rather than routing through Math.Pow and a
-        // float cumulative threshold) so that it is a bit-for-bit no-op, not
-        // just a distributionally-equivalent one -- the same rng.Next() draw
-        // must map to the same child it always did, since a same-seed game
-        // is used to verify this behaviourally.
+        // T=1.0 uses integer arithmetic on raw visits rather than Math.Pow and a float
+        // threshold, so the same rng.Next() draw maps to the same child bit for bit; a
+        // same-seed game is used to verify this.
         public Child SampleChildByVisits(SeededRandom rng)
         {
             if (EXPLORATION_TEMPERATURE == 1.0) {
@@ -285,25 +276,17 @@ public class SakkirinaGenNeural : AI
     PlayerEnum myPlayerID;
     SeededRandom rng;
 
-    // Counts this bot's own turns within the current game, incremented at
-    // each detected turn-start below. Exploration sampling is only active
-    // while _turnNumber <= EXPLORATION_TURNS.
+    // This bot's own turns in the current game, counted at each turn start below.
+    // Exploration is active while _turnNumber <= EXPLORATION_TURNS.
     private int _turnNumber = 0;
 
-    // ONNX evaluator + perspective-flip bookkeeping for Evaluate() above,
-    // mirroring ISMCTSBot's ValueNetworkEvaluator usage and END_TURN flip
-    // tracking.
+    // ONNX evaluator, plus bookkeeping for the perspective flip in Evaluate() below.
     private ValueNetworkEvaluator? _evaluator;
     private long _evalFlippedCount = 0;
     private long _evalNotFlippedCount = 0;
 
-    // Throughput telemetry: an unambiguous, directly-counted alternative to
-    // inferring iteration counts from the private search tree's visit counts
-    // (which broke because ProceedTree re-roots the tree at the end of every
-    // Play() call, so a before/after snapshot of rootNode.visits can end up
-    // reading two different nodes' counters). _evalNetworkStopwatch times ONLY
-    // the EvaluateBoardState call itself, to see what fraction of wall clock
-    // the ONNX inference actually accounts for.
+    // Throughput telemetry: _totalEvalCalls counts every Evaluate() call, and
+    // _evalNetworkStopwatch times only the ONNX inference within it.
     private long _totalEvalCalls = 0;
     private readonly System.Diagnostics.Stopwatch _evalNetworkStopwatch = new System.Diagnostics.Stopwatch();
     private readonly System.Diagnostics.Stopwatch _gameWallClock = new System.Diagnostics.Stopwatch();
@@ -365,9 +348,8 @@ public class SakkirinaGenNeural : AI
         return 10 * (int)tier + agent.CurrentHp * 3;
     }
 
-    // Original hand-written heuristic, kept so the two evaluators can be A/B'd
-    // inside the identical search later. No longer called by Simulate() -- see
-    // Evaluate() below, which replaces it as the active evaluator.
+    // The original hand-written heuristic. Simulate() calls Evaluate() below
+    // instead, which also uses this as its fallback when the model fails to load.
     static double EvaluateHeuristic(SeededGameState gameState, PlayerEnum playerID)
     {
         double value = 0;
@@ -450,13 +432,10 @@ public class SakkirinaGenNeural : AI
         return 1.0 / (1 + Math.Exp(-value / 900.0));
     }
 
-    // Active evaluator: same signature and semantics as EvaluateHeuristic above
-    // (a pseudo-win-probability in [0,1] for playerID), backed by the DeepSets
-    // value network instead of the hand-written heuristic. The network outputs
-    // P(gameState.CurrentPlayer wins), so it must be negated whenever playerID
-    // isn't the state's current player -- exactly the same perspective-flip
-    // logic as ISMCTSBot's END_TURN handling, tracked the same way so the flip
-    // rate can be verified from the log.
+    // Active evaluator, with the same signature and semantics as EvaluateHeuristic
+    // above (a pseudo-win-probability in [0,1] for playerID), backed by the DeepSets
+    // value network. The network outputs P(gameState.CurrentPlayer wins), so it is
+    // negated whenever playerID isn't the state's current player.
     double Evaluate(SeededGameState gameState, PlayerEnum playerID)
     {
         _totalEvalCalls++;
@@ -937,20 +916,13 @@ public class SakkirinaGenNeural : AI
         return value;
     }
 
-    // Defense in depth alongside the HashMove fixes below and the null-move
-    // fallback in Play(): root cause of the crash that used to surface here was
-    // found -- Play() could pass ProceedTree a null move (see the comment above
-    // the fallback in Play() for the full mechanism), which threw inside the
-    // inlined AreIsomorphic call with no frame appearing below ProceedTree in a
-    // Release stack trace. With that fixed at the source, this catch should
-    // never fire again -- kept anyway because tree-reuse detection failing for
-    // ANY reason should cost a cache miss, not the game. Falls back to
-    // rootNode = null (the method's own existing "no reuse" outcome) on any
-    // exception, logging the first occurrence with full details in case
-    // something else ever trips it.
+    // Defense in depth: any failure in tree-reuse detection below should cost a
+    // cache miss, not the game, so this falls back to no reuse (rootNode = null) on
+    // any exception rather than letting it propagate. Logs the first occurrence with
+    // full details.
     private bool _firstProceedTreeExceptionLogged = false;
 
-    // Counts how often Play()'s null-move fallback below actually fires.
+    // Counts how often Play()'s null-move fallback below fires.
     private long _noIsomorphicMatchCount = 0;
     private bool _firstNoIsomorphicMatchLogged = false;
 
@@ -990,17 +962,13 @@ public class SakkirinaGenNeural : AI
             gameState.EnemyPlayer.Prestige);
     }
 
-    // Load the ONNX model for Evaluate() above, mirroring ISMCTSBot.PregamePrepare.
-    // Falls back to EvaluateHeuristic (not a silent 0.5) if the model fails to
-    // load, since a perfectly good evaluator already exists in this same file.
+    // Loads the ONNX model for Evaluate() above, falling back to EvaluateHeuristic
+    // (not a silent 0.5) if it fails to load.
     //
-    // Model path is overridable via the SOT_MODEL_PATH env var (checked
-    // first, used verbatim if set -- no existence check before assignment,
-    // so a bad override still shows up clearly in the log below and in the
-    // load-failure path, rather than silently falling through to the
-    // built-in resolution as if nothing were set), so a data-generation run
-    // can point at a different model without a rebuild. Falls back to the
-    // existing multi-path resolution when unset.
+    // SOT_MODEL_PATH, if set, is used as given without an existence check, so a bad
+    // override shows up in the log and the load-failure path instead of silently
+    // falling through to the built-in resolution. Unset, the usual multi-path
+    // resolution applies.
     public override void PregamePrepare()
     {
         _gameWallClock.Restart();
@@ -1114,12 +1082,8 @@ public class SakkirinaGenNeural : AI
         }
         usedTimeInTurn += s.Elapsed;
 
-        // Exploration noise: for the bot's own first EXPLORATION_TURNS turns,
-        // sample the root child proportional to visit count instead of
-        // always taking the argmax, so self-play between two near-
-        // deterministic instances of this search visits more of the state
-        // space. After the window, this is exactly BestChild(), i.e. stock
-        // behavior.
+        // Exploration: for the bot's own first EXPLORATION_TURNS turns, sample the root
+        // child in proportion to visit count; afterwards this is BestChild().
         var bestChild = (ENABLE_EXPLORATION && _turnNumber <= EXPLORATION_TURNS)
             ? rootNode.SampleChildByVisits(rng)
             : rootNode.BestChild();
@@ -1133,18 +1097,11 @@ public class SakkirinaGenNeural : AI
             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
         }
 
-        // Root cause of both crash reports: `move` was overwritten to
-        // RootRuleBasedMove(...)'s result above and is only reassigned inside
-        // the foreach just above -- if bestMove (picked from a tree that may
-        // have been built under a different determinization) has no isomorphic
-        // match in the CURRENT possibleMoves, move is still null here.
-        // ProceedTree(null) then throws inside the inlined AreIsomorphic (no
-        // frame appears below ProceedTree in a Release stack trace, which is
-        // why this looked like a ProceedTree-local bug), and separately, a null
-        // Move returned to the engine makes EndGame's move-history logging
-        // throw too. bestMove itself is not a safe substitute -- it may not be
-        // legal in the current (re-determinized) state -- so fall back to
-        // possibleMoves[0], which always is.
+        // bestMove comes from a search tree that may have been built under a
+        // different determinization, so it can have no isomorphic match in the
+        // current possibleMoves, leaving `move` null here. bestMove itself is
+        // not a safe substitute, since it may not be legal in this exact state,
+        // so this falls back to possibleMoves[0], which always is.
         if (move is null)
         {
             _noIsomorphicMatchCount++;
@@ -1191,16 +1148,12 @@ public class SakkirinaGenNeural : AI
     // I would like to express our deepest gratitude to the author.
     class MoveComparer : Comparer<Move>
     {
-        // Release inlining collapses these into ProceedTree's frame in a stack
-        // trace, making a NullReferenceException here look like it came from
-        // there. Each `as` cast below used to be followed by a null-forgiving
-        // `!` dereference with no actual check -- if a move's concrete runtime
-        // type doesn't match what Command implies, the cast silently yields
-        // null and `!` throws, forfeiting the whole game. A hash collision
-        // between two unrecognised moves only costs a missed tree-reuse
-        // opportunity (harmless), so every site below now falls back to a
-        // Command-only hash instead of throwing, logging the first occurrence
-        // of each so the actual offending type is known.
+        // If a move's concrete runtime type doesn't match what its Command
+        // implies, the cast below yields null. A hash collision between two
+        // unrecognised moves only costs a missed tree-reuse opportunity
+        // (harmless), so every site below falls back to a Command-only hash
+        // instead of dereferencing a possibly-null cast, logging the first
+        // occurrence of each so the actual offending type is known.
         private static bool _firstUnrecognisedPatronMoveLogged = false;
         private static bool _firstUnrecognisedChoiceMoveLogged = false;
         private static bool _firstUnrecognisedCardMoveLogged = false;

@@ -14,9 +14,9 @@ namespace Bots;
 // from a DeepSets graph neural network (see DeepSetsCore.cs) instead of a
 // hand-written heuristic.
 //
-// Attribution: the search itself -- move generation, tree search, the
+// Attribution: the search itself (move generation, tree search, the
 // rule-based fast paths, move deduplication, and the simulation policy used
-// to seed node priors -- is derived from SakkirinaSolo, the 2025 competition
+// to seed node priors) is derived from SakkirinaSolo, the 2025 competition
 // winner. The only functional change here is Evaluate(): the network
 // replaces SakkirinaSolo's original hand-written evaluation function, which
 // is kept below (renamed EvaluateHeuristic) as a fallback if the model fails
@@ -221,20 +221,13 @@ public class DeepSetsBotTrim : AI
     PlayerEnum myPlayerID;
     SeededRandom rng;
 
-    // ONNX evaluator + perspective-flip bookkeeping for Evaluate() above,
-    // mirroring ISMCTSBot's ValueNetworkEvaluator usage and END_TURN flip
-    // tracking.
+    // ONNX evaluator, plus bookkeeping for the perspective flip in Evaluate() below.
     private ValueNetworkEvaluator? _evaluator;
     private long _evalFlippedCount = 0;
     private long _evalNotFlippedCount = 0;
 
-    // Throughput telemetry: an unambiguous, directly-counted alternative to
-    // inferring iteration counts from the private search tree's visit counts
-    // (which broke because ProceedTree re-roots the tree at the end of every
-    // Play() call, so a before/after snapshot of rootNode.visits can end up
-    // reading two different nodes' counters). _evalNetworkStopwatch times ONLY
-    // the EvaluateBoardState call itself, to see what fraction of wall clock
-    // the ONNX inference actually accounts for.
+    // Throughput telemetry: _totalEvalCalls counts every Evaluate() call, and
+    // _evalNetworkStopwatch times only the ONNX inference within it.
     private long _totalEvalCalls = 0;
     private readonly System.Diagnostics.Stopwatch _evalNetworkStopwatch = new System.Diagnostics.Stopwatch();
     private readonly System.Diagnostics.Stopwatch _gameWallClock = new System.Diagnostics.Stopwatch();
@@ -296,7 +289,7 @@ public class DeepSetsBotTrim : AI
     }
 
     // Original hand-written heuristic, kept so the two evaluators can be A/B'd
-    // inside the identical search later. No longer called by Simulate() -- see
+    // inside the identical search later. No longer called by Simulate(); see
     // Evaluate() below, which replaces it as the active evaluator.
     static double EvaluateHeuristic(SeededGameState gameState, PlayerEnum playerID)
     {
@@ -377,9 +370,7 @@ public class DeepSetsBotTrim : AI
     // (a pseudo-win-probability in [0,1] for playerID), backed by the DeepSets
     // value network instead of the hand-written heuristic. The network outputs
     // P(gameState.CurrentPlayer wins), so it must be negated whenever playerID
-    // isn't the state's current player -- exactly the same perspective-flip
-    // logic as ISMCTSBot's END_TURN handling, tracked the same way so the flip
-    // rate can be verified from the log.
+    // isn't the state's current player.
     double Evaluate(SeededGameState gameState, PlayerEnum playerID)
     {
         _totalEvalCalls++;
@@ -484,7 +475,7 @@ public class DeepSetsBotTrim : AI
         CardId.KNIGHT_COMMANDER, // heal
         // Crow
         CardId.BLACKFEATHER_KNIGHT,
-        // Allesia
+        // Alessia
         CardId.ALESSIAN_REBEL,
         CardId.MORIHAUS_SACRED_BULL, // knockout, my opes +3
     };
@@ -500,9 +491,9 @@ public class DeepSetsBotTrim : AI
         CardId.GOODS_SHIPMENT, // Hlaalu
         CardId.WAR_SONG, // Red Eagle
         CardId.PECK, // Crow
-        CardId.ALESSIAN_REBEL, // Allesia
+        CardId.ALESSIAN_REBEL, // Alessia
         CardId.FORTIFY, // Pellin
-        CardId.SWIPE, // Rahjin
+        CardId.SWIPE, // Rajhin
         CardId.MAINLAND_INQUIRIES, // Psijic
         CardId.SEA_ELF_RAID, // Orgnum 1P + 1C
         CardId.BEWILDERMENT
@@ -614,7 +605,7 @@ public class DeepSetsBotTrim : AI
         foreach (var (patron, pId) in gameState.PatronStates.All) {
             if (patron == PatronId.TREASURY) continue;
             if (pId == playerID) myPatronFavour += 1;
-            else if (pId == PlayerEnum.NO_PLAYER_SELECTED) { /* neutral -- counted in neither; kept as its own branch so it doesn't fall through to enemyPatronFavour below */ }
+            else if (pId == PlayerEnum.NO_PLAYER_SELECTED) { /* neutral: counted for neither side */ }
             else enemyPatronFavour += 1;
         }
         List<UniqueCard> myCards = currentPlayer.Hand.Concat(currentPlayer.Played.Concat(currentPlayer.CooldownPile.Concat(currentPlayer.DrawPile))).ToList();
@@ -775,7 +766,6 @@ public class DeepSetsBotTrim : AI
                 logits[i] = Math.Exp((logits[i] - bestScore) / temperature);
                 sum += logits[i];
             }
-            //for (int i = 0; i < logits.Length; i++) Console.WriteLine("{0} {1}", moves[i], logits[i] / sum);
             double r = sum * rng.Next() / int.MaxValue;
             for (int i = 0; i < logits.Length; i++) {
                 sum -= logits[i];
@@ -804,7 +794,7 @@ public class DeepSetsBotTrim : AI
 
     double MoveSimulate(SeededGameState gameState, Move move, SeededRandom rng)
     {
-        var (newGameState, newPossibleMoves) = gameState.ApplyMove(move);//, (ulong)rng.Next());
+        var (newGameState, newPossibleMoves) = gameState.ApplyMove(move);
         return Simulate(newGameState, newPossibleMoves, rng, move.Command == CommandEnum.END_TURN);
     }
 
@@ -827,17 +817,10 @@ public class DeepSetsBotTrim : AI
         return value;
     }
 
-    // Defense in depth alongside the HashMove fixes below and the null-move
-    // fallback in Play(): root cause of the crash that used to surface here was
-    // found -- Play() could pass ProceedTree a null move (see the comment above
-    // the fallback in Play() for the full mechanism), which threw inside the
-    // inlined AreIsomorphic call with no frame appearing below ProceedTree in a
-    // Release stack trace. With that fixed at the source, this catch should
-    // never fire again -- kept anyway because tree-reuse detection failing for
-    // ANY reason should cost a cache miss, not the game. Falls back to
-    // rootNode = null (the method's own existing "no reuse" outcome) on any
-    // exception, logging the first occurrence with full details in case
-    // something else ever trips it.
+    // Defense in depth: any failure in tree-reuse detection below should cost
+    // a cache miss, not the game, so this falls back to no reuse (rootNode =
+    // null) on any exception rather than letting it propagate. Logs the first
+    // occurrence with full details in case something trips it.
     private bool _firstProceedTreeExceptionLogged = false;
 
     // Counts how often Play()'s null-move fallback below actually fires.
@@ -872,7 +855,6 @@ public class DeepSetsBotTrim : AI
         rootNode = null;
     }
 
-    // Load the ONNX model for Evaluate() above, mirroring ISMCTSBot.PregamePrepare.
     // Falls back to EvaluateHeuristic (not a silent 0.5) if the model fails to
     // load, since a perfectly good evaluator already exists in this same file.
     public override void PregamePrepare()
@@ -976,18 +958,11 @@ public class DeepSetsBotTrim : AI
             if (MoveComparer.AreIsomorphic(m, bestMove)) { move = m; break; }
         }
 
-        // Root cause of both crash reports: `move` was overwritten to
-        // RootRuleBasedMove(...)'s result above and is only reassigned inside
-        // the foreach just above -- if bestMove (picked from a tree that may
-        // have been built under a different determinization) has no isomorphic
-        // match in the CURRENT possibleMoves, move is still null here.
-        // ProceedTree(null) then throws inside the inlined AreIsomorphic (no
-        // frame appears below ProceedTree in a Release stack trace, which is
-        // why this looked like a ProceedTree-local bug), and separately, a null
-        // Move returned to the engine makes EndGame's move-history logging
-        // throw too. bestMove itself is not a safe substitute -- it may not be
-        // legal in the current (re-determinized) state -- so fall back to
-        // possibleMoves[0], which always is.
+        // bestMove comes from a search tree that may have been built under a
+        // different determinization, so it can have no isomorphic match in the
+        // current possibleMoves, leaving `move` null here. bestMove itself is
+        // not a safe substitute, since it may not be legal in this exact state,
+        // so this falls back to possibleMoves[0], which always is.
         if (move is null)
         {
             _noIsomorphicMatchCount++;
@@ -1034,16 +1009,12 @@ public class DeepSetsBotTrim : AI
     // I would like to express our deepest gratitude to the author.
     class MoveComparer
     {
-        // Release inlining collapses these into ProceedTree's frame in a stack
-        // trace, making a NullReferenceException here look like it came from
-        // there. Each `as` cast below used to be followed by a null-forgiving
-        // `!` dereference with no actual check -- if a move's concrete runtime
-        // type doesn't match what Command implies, the cast silently yields
-        // null and `!` throws, forfeiting the whole game. A hash collision
-        // between two unrecognised moves only costs a missed tree-reuse
-        // opportunity (harmless), so every site below now falls back to a
-        // Command-only hash instead of throwing, logging the first occurrence
-        // of each so the actual offending type is known.
+        // If a move's concrete runtime type doesn't match what its Command
+        // implies, the cast below yields null. A hash collision between two
+        // unrecognised moves only costs a missed tree-reuse opportunity
+        // (harmless), so every site below falls back to a Command-only hash
+        // instead of dereferencing a possibly-null cast, logging the first
+        // occurrence of each so the actual offending type is known.
         private static bool _firstUnrecognisedPatronMoveLogged = false;
         private static bool _firstUnrecognisedChoiceMoveLogged = false;
         private static bool _firstUnrecognisedCardMoveLogged = false;

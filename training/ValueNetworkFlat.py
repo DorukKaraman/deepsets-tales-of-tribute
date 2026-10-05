@@ -1,72 +1,15 @@
 """
-Plain MLPs over the padded flat vector -- the architecture half of the DeepSets
-ablation.
+Plain MLPs over the padded flat vector, for the DeepSets ablation.
 
-TWO CONFIGURATIONS, ANSWERING TWO DIFFERENT OBJECTIONS.
+  matched         12,691 -> 5 -> 128 -> 64 -> 1        72,549 parameters
+  wide            12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 parameters
+  matched_sorted  as matched, on canonically sorted node rows
 
-  matched   12,691 -> 5 -> 128 -> 64 -> 1        72,549 parameters
-            Equal capacity (99.3% of the DeepSets model's 73,089). Answers:
-            does the set structure help when the two models are allowed the
-            same number of weights?
-
-  wide      12,691 -> 128 -> 128 -> 64 -> 1   1,649,409 parameters
-            22.6x the DeepSets model. Answers: does the set structure help even
-            when the flat model is given far more capacity than the model it is
-            being compared against? If the flat model still loses here, the
-            result is much stronger, and it forecloses the obvious objection
-            that the matched configuration was starved into losing.
-
-WHY "matched" IS A 5-UNIT FIRST LAYER, AND WHY THAT IS NOT A BUG. At a
-12,691-dim input the first layer alone costs 12,691 weights per unit, so the
-parameter budget caps it at 73,089 / 12,692 = 5.75 units even if the rest of the
-network were free. Five is what fits. This is a real and severe bottleneck and
-it is stated rather than engineered around, because engineering around it means
-either breaking the parameter match or truncating the input -- and truncation
-would remove enemy hand-and-draw cards specifically, turning an architecture
-ablation into an architecture-plus-information one (see StateParserFlat).
-
-It is also worth being precise about what the bottleneck is NOT evidence for.
-Choosing a smaller MAX_NODES buys almost nothing: the ceiling is 7 units at 96
-nodes, 11 at 60, 12 at 48. There is no cap at which a parameter-matched flat
-model over this input is not a single-digit-to-low-double-digit bottleneck. The
-narrowness is a consequence of flattening 128x99 inputs on a 73k budget, which
-is precisely the cost of not having a shared per-card encoder. The "wide"
-configuration exists so that this cost can be paid off and the structural
-question asked separately.
-
-The head (-> 128 -> 64 -> 1) is deliberately identical to the DeepSets model's
-evaluator tail, so the two networks differ in how they get to a 128-dim
-representation and in nothing after it.
-
-THROUGHPUT: THE ARITHMETIC WAS A HYPOTHESIS, AND IT OVER-PREDICTED BY 10x.
-Counting multiply-accumulates, the DeepSets model runs its node encoder once per
-card: 29,056 MACs per node plus 43,456 fixed, so about 1,002,000 MACs at the
-median 33-node state and 3,762,624 at a 128-node one. Either flat model's cost
-is constant in the node count, and "matched" comes to about 72,000 MACs --
-roughly 14x fewer at the median. That was a reason to EXPECT the flat model to
-be faster. It was not a measurement, and it was wrong about the size of the
-effect.
-
-MEASURED ON x86 (tools/compare_onnx_models.py, 5,000 real states,
-single-threaded, on a compute node -- the hardware the benchmark runs on):
-
-    DeepSets         49.0 us median
-    flat-matched     60.7 us median     1.24x SLOWER
-    flat-wide       240.0 us median     4.7x  SLOWER
-
-So the prediction failed outright: 14x cheaper in MACs, 1.24x slower in wall
-clock. A 12,691->5 matvec streams 63,455 weights to produce five numbers and is
-entirely memory-bound, so its MACs are nearly free and its loads are not, while
-33 batched 99->128 rows is a shape onnxruntime is good at. Arithmetic intensity
-decides this and a MAC count cannot see it. "wide" loses for a plainer reason:
-1,649,409 weights is 6.6 MB, past any useful cache residency.
-
-QUOTE THE x86 NUMBERS ONLY. The same three files on an Apple M1, with the
-pinned x86_64 Python under Rosetta, put flat-matched at 1.45x FASTER than
-DeepSets -- same models, same tool, same states, opposite sign. The denormal
-warning in export_to_onnx.py does not apply here (none of these models carry
-subnormal weights), but GEMM-shape efficiency is just as host-specific, and on
-this one the host decides the direction of the result and not merely its size.
+matched is held to roughly the DeepSets model's 73,089 parameters, which at a
+12,691-dim input leaves room for only five first-layer units. wide removes that
+limit; matched_sorted makes the input permutation-invariant. The head
+(-> 128 -> 64 -> 1) is the same as the DeepSets evaluator's. Results are in
+REPRODUCE.md section 8.
 """
 
 import torch
@@ -74,24 +17,21 @@ import torch.nn as nn
 
 from StateParserFlat import FLAT_DIM, batch_pad_and_flatten
 
-# name -> (h1, h2, h3). See the module docstring for what each one answers.
+# name -> (h1, h2, h3) hidden-layer widths.
 FLAT_CONFIGS = {
     "matched": (5, 128, 64),
     "wide": (128, 128, 64),
     "matched_sorted": (5, 128, 64),
 }
 
-# Archs that put the node rows into a canonical order before flattening.
-# matched_sorted is byte-for-byte the same network as matched -- same widths,
-# same 72,549 parameters -- differing only in that the rows arrive sorted, so
-# any difference between the two arms is attributable to permutation
-# invariance and to nothing else.
+# Archs whose node rows are sorted into canonical order before flattening.
+# matched_sorted has matched's widths, so the two differ only in the sort.
 SORTED_ARCHS = {"matched_sorted"}
 
 
 class TributeValueNetworkFlat(nn.Module):
-    """A plain MLP over the [FLAT_DIM] vector. Emits a raw logit, like
-    TributeValueNetwork -- the sigmoid lives in the caller."""
+    """A plain MLP over the [FLAT_DIM] vector, returning a raw logit; the
+    caller applies the sigmoid."""
 
     def __init__(self, in_dim=FLAT_DIM, h1=5, h2=128, h3=64):
         super().__init__()
@@ -113,16 +53,10 @@ class TributeValueNetworkFlat(nn.Module):
 
 
 class FlatGraphAdapter(nn.Module):
-    """Training-only shim: PyG Batch -> flat matrix -> MLP.
+    """Training-only wrapper: PyG Batch -> flat matrix -> MLP.
 
-    train_local.py's loop calls model(batch) with a PyG Batch and reads
-    batch.u[:, PRESTIGE_CLOCK_GLOBAL_INDEX] for its bucketed metrics. This lets
-    the flat models run through that loop untouched, so both arms of the
-    ablation share one training implementation rather than a copy of it.
-
-    Not part of the exported artefact. export_flat_to_onnx.py traces the inner
-    TributeValueNetworkFlat with padding expressed in ONNX ops, so nothing in
-    this class reaches the .onnx file.
+    Lets train_local.py's loop, which passes a PyG Batch, drive the flat
+    models. It is not exported: export_flat_to_onnx.py traces the inner MLP.
     """
 
     def __init__(self, flat_model, sort=False):

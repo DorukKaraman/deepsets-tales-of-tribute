@@ -1,20 +1,15 @@
 #!/usr/bin/env bash
-# Cluster-scale benchmark harness: one game per SLURM array task, through
-# GameRunner directly (no --log-training-data). The matchup list, per-matchup
-# engine --timeout, game counts and per-task environment all come from a JSON
-# experiment config -- see tools/benchmark_cluster.py for the format and the
-# task-id layout, and experiments/configs/ for the configs themselves.
+# Cluster benchmark harness: one game per SLURM array task, run through the
+# built GameRunner binary (no --log-training-data). Matchups, per-matchup engine
+# --timeout, game counts and per-task environment come from a JSON experiment
+# config; see tools/benchmark_cluster.py for the format and task-id layout, and
+# experiments/configs/ for the configs.
 #
-# The default config reproduces the original hardcoded 10-matchup benchmark
-# exactly, so an existing run resumes unchanged across the config rework.
+# Builds once; every array task then invokes the binary directly.
 #
-# DIRECT BINARY INVOCATION ONLY, same reasoning as tools/generate_data.sh:
-# this script builds once, every array task invokes the built binary directly.
-#
-# RESUMABLE. tools/benchmark_cluster.py writes a result JSON file only after a
-# game completes successfully; a task whose result file already exists is
-# skipped without running anything. A killed/crashed/still-running task has no
-# result file and is simply retried by resubmitting the same array index.
+# Resumable: benchmark_cluster.py writes a result file only after a game
+# completes, and a task whose result file exists is skipped. Resubmitting the
+# same array index retries a task that has none.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,35 +17,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GAME_RUNNER_DIR="$REPO_ROOT/GameRunner"
 BOTS_DIR="$REPO_ROOT/Bots"
 
-# Hardcoded, not a flag, same reasoning as tools/benchmark.sh and
-# tools/generate_data.sh: a Debug build silently disables JIT optimizations
-# for the whole wall-clock-budgeted search, and these numbers need to be
-# trustworthy.
+# Always Release: a Debug build disables JIT optimizations under a wall-clock
+# search budget.
 CONFIGURATION="Release"
 BOTS_TFM="netstandard2.1"
 BINARY="$GAME_RUNNER_DIR/bin/$CONFIGURATION/net8.0/GameRunner"
 
 DEFAULT_CONFIG="legacy_paper_benchmark"
 
-# MANDATORY pin, not optional like tools/generate_data.sh's --expect-onnx-sha256.
-# A bot that fails to load its model does not crash or refuse to play -- it
-# silently falls back to a heuristic evaluator and keeps going, so a 400-game
-# matchup against the wrong (or no) model would produce a full set of
-# plausible-looking numbers for the wrong experiment, with nothing anywhere
-# flagging it. This check is therefore unconditional, on every single task.
+# Model pins, checked on every task. A bot that fails to load its model falls
+# back to a heuristic evaluator without any error, so a wrong model yields
+# plausible numbers for the wrong experiment.
 #
-# The pin is a LIST now, not a single hash: per-seed training
-# (scripts/slurm_train.sh) produces several legitimate models, so "the one
-# correct model" is no longer a well-defined thing. The list comes from the
-# config's "allowed_onnx_sha256" (read here with python3, so the config stays
-# the single source of truth), plus anything added with
-# --allow-onnx-sha256. What is NOT negotiable is that the model GameRunner
-# will actually load has to be ON the list.
-#
-# Note this checks GameRunner's own copy. A matchup that sets SOT_MODEL_PATH
-# points its bot somewhere else entirely; tools/benchmark_cluster.py checks
-# that one against the same list, because this script cannot -- it does not
-# know which task is about to run.
+# GameRunner's built-in copy is checked here against the config's
+# "builtin_onnx_sha256" (guard 2/2). Models a row loads through SOT_MODEL_PATH
+# are checked by tools/benchmark_cluster.py against "allowed_onnx_sha256" plus
+# any --allow-onnx-sha256, since only it knows which task is running.
 
 CONFIG="$DEFAULT_CONFIG"
 TASK_ID=""
@@ -181,10 +163,7 @@ if [ ! -x "$BINARY" ]; then
 fi
 RUNNER_OUT_DIR="$(dirname "$BINARY")"
 
-# --- Pre-flight guard 1/2: Bots.dll -- same check, same reasoning as
-# tools/generate_data.sh. Only printed once per task's log, but cheap enough
-# (a stat + a sha256 of a few hundred KB) that running it on every task is not
-# worth special-casing away.
+# Pre-flight guard 1/2: Bots.dll, as in tools/generate_data.sh.
 EXPECTED_BOTS_DLL="$BOTS_DIR/bin/$CONFIGURATION/$BOTS_TFM/Bots.dll"
 ACTUAL_BOTS_DLL="$RUNNER_OUT_DIR/Bots/Bots.dll"
 
@@ -210,18 +189,10 @@ if [ "$EXPECTED_BOTS_SHA" != "$ACTUAL_BOTS_SHA" ]; then
   exit 1
 fi
 
-# --- Pre-flight guard 2/2: the STALE-BUILD check. GameRunner ships its own
-# copy of the model, and this confirms that copy is the one the config expects.
-#
-# It is checked against "builtin_onnx_sha256", NOT against
-# "allowed_onnx_sha256", and the separation is the point. allowed_onnx_sha256
-# lists the models a ROW may load through SOT_MODEL_PATH; the built-in copy is
-# a different thing that happens to be a model too. Checking the built-in copy
-# against the allowed list forced every config to whitelist the shipped hash
-# even when no row should ever load it -- and once the shipped hash is on the
-# allowed list, a row that silently fell back to the built-in model passes the
-# pin. For a control row running the same architecture at the same speed,
-# nothing else would have caught it.
+# Pre-flight guard 2/2: GameRunner's built-in model must match the config's
+# "builtin_onnx_sha256". It is kept separate from "allowed_onnx_sha256": if the
+# shipped hash had to be on the allowed list, a row that fell back to the
+# built-in model would pass its pin.
 BUILTIN_HASH="$("$PYTHON_BIN" -c '
 import json, sys, os
 sys.path.insert(0, sys.argv[1])

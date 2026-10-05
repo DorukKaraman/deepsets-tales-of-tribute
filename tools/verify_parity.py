@@ -1,36 +1,28 @@
 """
-The golden cross-language parity test for the value network feature schema.
+Cross-language parity test for the value network feature schema.
 
-Compares the REAL Python code path (StateParser.json_to_pyg_graph) against the
-REAL C# code path (Bots.FeatureExtractor.ParseState, invoked through the
-tools/ParityCheck console tool, which reconstructs an actual
-ScriptsOfTribute.Serializers.GameState from logged JSON and runs the actual
-production method on it) -- not a reimplementation of either side's formulas.
-A test where both sides were written from the same spec by the same author
-proves nothing; this one runs the actual code that ships.
+Runs the production code on both sides: StateParser.json_to_pyg_graph in
+Python, and Bots.FeatureExtractor.ParseState in C# through tools/ParityCheck,
+which rebuilds a ScriptsOfTribute.Serializers.GameState from the logged JSON.
 
 Samples states from a generate_data.py output directory (default /tmp/gen50),
-spread across early/mid/late game by prestige clock so all phases are
-represented, and diffs:
-  - node matrix row count (exact)
-  - node matrix contents (each side's rows sorted lexicographically first,
-    since row order may legitimately differ between the two implementations)
-  - node matrix ROW ORDER, unsorted, reported separately. Sorting is right for
-    the DeepSets model, which mean-pools and cannot see order -- but it means
-    order parity would otherwise never be tested, and the flat-MLP ablation
-    (REPRODUCE.md section 9) is not permutation-invariant.
+spread evenly over four prestige-clock phases, and compares:
+  - node matrix row count
+  - node matrix contents, each side's rows sorted first
+  - node matrix row order, unsorted, reported separately; the DeepSets model
+    mean-pools and cannot see order, but the flat-MLP ablation
+    (REPRODUCE.md section 8) is not permutation-invariant
   - global vector, element by element
 
-Reports the max abs delta per column, labelled by feature block, EVEN WHEN
-EVERYTHING PASSES -- the numbers are the point, not just the verdict. Exits
-nonzero if any column's max delta exceeds DELTA_THRESHOLD.
+Prints the max abs delta per column, labelled by feature block, whether or not
+the test passes. Exits nonzero if any column exceeds DELTA_THRESHOLD.
 
-Read-only against --data-dir. Builds tools/ParityCheck (Release) as a side
-effect. Writes only to a temp directory.
+Read-only against --data-dir. Builds tools/ParityCheck (Release) and writes only
+to a temp directory.
 
 Usage:
     python tools/verify_parity.py
-    python tools/verify_parity.py --data-dir /tmp/gen50 --num-samples 50
+    python tools/verify_parity.py --data-dir /path/to/gen50 --num-samples 50
 """
 import argparse
 import glob
@@ -55,7 +47,7 @@ sys.path.insert(0, TRAINING_DIR)
 
 DELTA_THRESHOLD = 1e-6
 
-# Matches Bots/src/DeepSetsCore.cs (class FeatureExtractor)'s NODE_DIM layout exactly.
+# NODE_DIM layout of FeatureExtractor in Bots/src/DeepSetsCore.cs.
 NODE_FEATURE_BLOCKS = [
     (0, 7, "deck"),
     (7, 8, "cost"),
@@ -66,7 +58,7 @@ NODE_FEATURE_BLOCKS = [
     (90, 99, "location"),
 ]
 
-# Matches StateParser.extract_global_context / FeatureExtractor.EncodeGlobalContext exactly.
+# Layout of StateParser.extract_global_context / FeatureExtractor.EncodeGlobalContext.
 GLOBAL_FEATURE_NAMES = [
     "CurrentPlayer.Coins", "CurrentPlayer.Power", "CurrentPlayer.Prestige", "CurrentPlayer.PatronCalls",
     "EnemyPlayer.Coins", "EnemyPlayer.Power", "EnemyPlayer.Prestige",
@@ -74,7 +66,7 @@ GLOBAL_FEATURE_NAMES = [
     "PrestigeClock", "PrestigeDifferential", "MyDeckSize", "EnemyKnownDeckSize", "MyAgentCount", "EnemyAgentCount",
 ]
 
-# Same 4-phase bucketing tools/diagnose_value_net.py already uses for prestige-clock buckets.
+# The prestige-clock buckets tools/diagnose_value_net.py uses.
 BUCKET_EDGES = [0.25, 0.5, 0.75, 1.2001]
 
 
@@ -104,9 +96,8 @@ def prestige_clock_of(state):
 
 
 def sample_states(data_dir, num_samples, seed):
-    """Stream every record under data_dir, bucket by prestige clock into the
-    same 4 phase buckets diagnose_value_net.py uses, then sample evenly
-    across buckets so all game phases are represented."""
+    """Stream every record under data_dir, bucket by prestige clock, then
+    sample evenly across buckets."""
     shards = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl.gz"), recursive=True))
     if not shards:
         sys.exit(f"ERROR: no shards found under {data_dir}")
@@ -198,17 +189,10 @@ def main():
                     if d > node_deltas[j]:
                         node_deltas[j] = d
 
-            # ROW ORDER, unsorted. The comparison above sorts both sides first,
-            # which is correct for the DeepSets model -- it mean-pools, so row
-            # order genuinely cannot reach its output -- but it means order
-            # parity was never actually tested. It matters for any model that
-            # is NOT permutation-invariant, the flat-MLP ablation in
-            # REPRODUCE.md section 9 being the one that exists.
-            #
-            # Compared at float32, because both sides produce float32 and a
-            # JSON round-trip perturbs the float64 view of the same value.
-            # Comparing in float64 reports a mismatch on essentially every
-            # state and means nothing.
+            # Row order, unsorted. Matters only for a model that is not
+            # permutation-invariant, such as the flat-MLP ablation.
+            # Compared at float32: both sides produce float32, and the JSON
+            # round-trip perturbs the float64 view of the same value.
             order_ok = all(
                 np.float32(row_py[j]) == np.float32(row_cs[j])
                 for row_py, row_cs in zip(py_node, cs_node)

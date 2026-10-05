@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Measure a bot's win rate against a baseline via GameRunner, with enough games
-# that the confidence interval is smaller than the effects being chased.
+# that the confidence interval is smaller than the effect being measured.
 #
-# PARALLELISM IS PROCESS-LEVEL ONLY. GameRunner reuses one bot instance across
-# --runs N within a single process; concurrent games sharing an instance would
-# corrupt the ONNX session and telemetry counters. This script never passes
-# GameRunner's own --threads flag -- instead it builds once, then spawns one OS
-# process per game (via tools/benchmark_runner.py, bounded by --jobs concurrent
-# processes).
+# Parallel across processes only. GameRunner reuses one bot instance across
+# --runs N, and concurrent games on one instance would corrupt its ONNX session
+# and telemetry counters, so GameRunner's --threads is never passed. Builds once,
+# then tools/benchmark_runner.py runs one process per game, at most --jobs at a
+# time.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,21 +14,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GAME_RUNNER_DIR="$REPO_ROOT/GameRunner"
 BOTS_DIR="$REPO_ROOT/Bots"
 
-# Hardcoded, not a flag: this script exists to produce numbers worth trusting,
-# and a Debug build silently disables JIT optimizations for the whole
-# wall-clock-budgeted search -- there is no legitimate reason to benchmark
-# anything but Release.
+# Always Release: a Debug build disables JIT optimizations under a wall-clock
+# search budget.
 CONFIGURATION="Release"
 BOTS_TFM="netstandard2.1"
 
 DETECTED_JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 
-# The value network is trained exclusively on the competition patron pool --
-# benchmarking against the engine's default 9-patron pool would test it on
-# three decks (PSIJIC, HLAALU, RED_EAGLE) it has never seen and that cannot
-# occur in competition. This default keeps benchmarks representative of what
-# will actually be played; override with --patrons if you deliberately want
-# a different pool for some other comparison.
+# The value network was trained on the competition patron pool only. The
+# engine's default 9-patron pool adds PSIJIC, HLAALU and RED_EAGLE, which it has
+# never seen and which cannot occur in competition. Override with --patrons.
 DEFAULT_PATRONS="ANSEI,DUKE_OF_CROWS,RAJHIN,ORGNUM,PELIN,SAINT_ALESSIA"
 
 BOT_A=""
@@ -127,8 +121,7 @@ if [ -z "$TIMEOUT" ]; then
   exit 1
 fi
 
-# Defense in depth: benchmark_runner.py also strips these per-worker, but make
-# sure this shell isn't the source of an accidental leak either.
+# benchmark_runner.py also strips these per worker.
 unset SOT_LOG SOT_LOG_FILE SOT_DUMP_DIR 2>/dev/null || true
 
 echo "=== Building Bots ($CONFIGURATION) explicitly -- GameRunner has no compile-time"
@@ -149,10 +142,9 @@ RUNNER_OUT_DIR="$(dirname "$BINARY")"
 echo "Using binary: $BINARY"
 echo
 
-# --- Pre-flight guard: abort if the Bots.dll (or onnx) the runner will actually
-# load doesn't match what was just freshly built in $CONFIGURATION. Recency
-# (mtime) is NOT checked here on purpose -- a fresh Debug DLL under a Release
-# runner must still fail this check, so identity is compared by size+sha256.
+# Pre-flight guard: abort if the Bots.dll (or onnx) the runner will load differs
+# from the fresh $CONFIGURATION build. Compared by size and sha256, not mtime,
+# so a fresh Debug DLL under a Release runner still fails.
 EXPECTED_BOTS_DLL="$BOTS_DIR/bin/$CONFIGURATION/$BOTS_TFM/Bots.dll"
 ACTUAL_BOTS_DLL="$RUNNER_OUT_DIR/Bots/Bots.dll"
 

@@ -1,44 +1,24 @@
 """
-Process-parallel training-data generation via GameRunner's
---log-training-data. Invoked by tools/generate_data.sh -- not usually run
-directly (it skips the build + Bots.dll/onnx integrity checks
-tools/generate_data.sh does before exec'ing here).
+Process-parallel training-data generation via GameRunner's --log-training-data.
+Normally invoked by tools/generate_data.sh, which first runs the build and the
+Bots.dll/onnx integrity checks that this script skips.
 
-TWO BOTS, NOT ONE. --bot sets both sides (self-play, the default and what the
-shipped model was trained on); --bot-a/--bot-b set them independently. The
-second form exists for HELD-OUT evaluation data: neither shipped model was
-trained on games between DeepSetsBotExp and SakkirinaSolo, so a dataset
-generated from that pairing is genuinely unseen, in a way that a fresh
-self-play dataset from the same generator is not. See
-tools/evaluate_checkpoints.py, which is what consumes it.
+--bot sets both sides (self-play, which is what the shipped models were trained
+on); --bot-a/--bot-b set them independently, for evaluation data from a pairing
+neither model was trained on (consumed by tools/evaluate_checkpoints.py). When
+the two bots differ, consecutive jobs swap seats, since first-player advantage
+correlates with the outcome label.
 
-SEAT ALTERNATION: when the two bots differ, consecutive jobs swap seats
-(job 0 runs bot_a as P1, job 1 runs bot_b as P1, and so on). First-player
-advantage is real and it correlates with the outcome label, so a dataset
-generated entirely with one agent in seat P1 carries a systematic bias --
-which for an evaluation set means every reported metric inherits it. Self-play
-(--bot) does not alternate, because swapping a bot with itself is a no-op.
+One process per job, at most --jobs at a time, each running `--runs N` so
+GameRunner reuses bot instances across games. Each job has its own contiguous
+seed range and its own subdirectory under --out-dir, so shard names cannot
+collide across jobs.
 
-DESIGN: one OS process per JOB (bounded by --jobs concurrent processes), each
-running `--runs N` so GameRunner's own bot-instance-reuse-across-games
-amortizes process startup -- this is deliberately NOT one process per game
-(see tools/benchmark_runner.py for that model; it doesn't fit here because a
-10k-game generation run needs process count decoupled from game count).
-Each job gets its own contiguous seed range and its own subdirectory under
---out-dir, so GameRunner's existing per-process shard naming (pid + worker id
-+ matchup) can never collide across jobs even if two jobs happen to share a
-PID on different machines in a cluster.
-
-RESUMABLE AT JOB GRANULARITY, not game granularity: a job writes a marker
-file (tools/out/.../.progress/job_NNNN.json) only after it exits cleanly with
-a fully-parsed stats block. Relaunching the same command skips any job whose
-marker matches the current plan (same seed, same game count) and reuses its
-recorded stats for the summary. A job with no marker -- whether it never ran,
-or died partway through --runs N -- has its output subdirectory wiped and is
-run again from scratch; GameRunner has no way to resume a single process
-mid-`--runs`, so partial per-job progress cannot be preserved, only whole-job
-progress. This is why the marker is written strictly after success, never
-before or during.
+Resumable per job, not per game: a job writes its marker
+(.progress/job_NNNN.json) only after a clean exit with a fully parsed stats
+block. A rerun skips jobs whose marker matches the plan (seed, game count, seat)
+and reruns any other job from scratch after wiping its subdirectory, because
+GameRunner cannot resume partway through --runs.
 """
 import argparse
 import datetime
@@ -74,22 +54,17 @@ LINE_PATTERNS = {
 }
 REQUIRED_KEYS = set(LINE_PATTERNS)
 
-# Must match DataLoggingWrapper.CleanEndReasons in GameRunner/Program.cs
-# exactly -- these are the three GameEndReasons whose turns actually get
-# written to a shard. TURN_LIMIT_EXCEEDED and "other factors" (BOT_EXCEPTION,
-# TURN_TIMEOUT, INCORRECT_MOVE, etc.) are discarded by the wrapper even
-# though GameRunner's own GameEndStatsCounter still counts them as completed
-# games -- so "completed" and "clean/logged" are different numbers, both
-# worth reporting for a data-generation run.
+# Must match DataLoggingWrapper.CleanEndReasons in GameRunner/Program.cs: the
+# end reasons whose turns are written to a shard. GameEndStatsCounter still
+# counts the other games as completed, so completed and logged games differ.
 CLEAN_REASON_KEYS = ("prestige40", "prestige80", "patron_favor")
 DISCARDED_REASON_KEYS = ("turn_limit", "other")
 
 
 def plan_jobs(games, jobs, seed_base, out_dir, bot_a, bot_b, swap_offset=0):
     """swap_offset shifts the seat-alternation parity. tools/generate_data.sh
-    passes the SLURM array task id there: with --task-id every task runs a
-    single job numbered 0, so without the offset every cluster task would put
-    the same bot in seat P1 and the alternation would never happen."""
+    passes the SLURM array task id: with --task-id every task runs a single job
+    numbered 0, so without the offset every task would seat the same bot as P1."""
     games_per_job = games // jobs
     remainder = games % jobs
     alternate = bot_a != bot_b
@@ -320,9 +295,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(progress_dir, exist_ok=True)
 
-    # Generous per-job watchdog, scaled by how many games this job will play
-    # sequentially: same per-game budget tools/benchmark_runner.py uses
-    # (max(1800, timeout*180)), multiplied out across the job's whole --runs N.
+    # Per-job watchdog: benchmark_runner.py's per-game budget
+    # (max(1800, timeout*180)) times the job's game count.
     per_game_watchdog = max(1800, TIMEOUT_S * 180)
 
     to_run = []
@@ -331,8 +305,8 @@ def main():
         marker = load_marker(marker_path(progress_dir, job["job_id"]))
         if (marker is not None and marker.get("seed") == job["seed"]
                 and marker.get("games") == job["games"]
-                # A marker from a run with the other seat assignment describes
-                # different games, even at the same seed. Treat it as stale.
+                # A marker from the other seat assignment describes
+                # different games, even at the same seed.
                 and marker.get("p1", job["p1"]) == job["p1"]
                 and marker.get("ok")):
             resumed.append((job, marker))

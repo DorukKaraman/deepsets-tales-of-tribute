@@ -1,74 +1,24 @@
 """
-Compare two ONNX models on real game states: do they disagree, and how fast is
-each?
+Compare two ONNX models on real game states: how often they disagree, and how
+fast each runs.
 
-WHY THIS EXISTS. The five per-seed models each carry 14,000-19,000 subnormal
-weights; the shipped model carries none. The shipped model was trained on Apple
-Silicon, which flushes denormals to zero; the seeds were trained on x86, which
-does not. Subnormal arithmetic falls off onnxruntime's fast path, and the cost
-is not subtle: seed 0 measured 1,016 us per inference against the shipped
-model's 26.8 us, a 38x slowdown on graphs that are otherwise identical. In a
-benchmark where the six models were supposed to differ only in training seed,
-that silently gave the seeds ~1,400 evaluations per turn against the shipped
-model's ~6,400 -- so they were not being compared at equal search at all.
+    python tools/compare_onnx_models.py --onnx-a A.onnx --onnx-b B.onnx \\
+        --data-dir <dir>
 
-The fix is to zero weights below 1e-30 before export. A 10-input spot check
-showed no output change, but that is far too thin to justify re-exporting five
-models on: these weights are near-dead precisely because almost nothing
-activates them, so most random inputs will never touch them and a clean spot
-check is close to uninformative. This script runs the check on thousands of real
-states instead, and measures the timing gap directly rather than inferring it
-from evaluations per turn.
+Exits nonzero if any predicted winner changes, so it can gate a re-export.
 
-Typical use -- confirm a de-subnormalised re-export changes nothing:
+A predicted winner is sigmoid(logit) >= 0.5, the convention train_local.py and
+evaluate_checkpoints.py use for accuracy. The bot never thresholds: it ranks
+moves on the continuous value, so any nonzero difference can change its play.
+"States with any difference" is the stricter result; the flip count is only a
+coarse gate.
 
-    python tools/compare_onnx_models.py \\
-        --onnx-a $HPCWORK/tot_models/seed_00/DeepSetsValueNetwork_seed_00.onnx \\
-        --onnx-b $HPCWORK/tot_models/seed_00/DeepSetsValueNetwork_seed_00_fixed.onnx \\
-        --data-dir $HPCWORK/heldout
+Run the timing on the hardware the benchmark uses. Subnormal weights are slow on
+x86 but free on hosts that flush denormals in hardware, such as Apple Silicon,
+where this reports about 1.0x even for a model full of them. The script warns
+when it sees that case.
 
-Exits nonzero if any predicted winner changes, so it can gate a re-export
-script.
-
-WHAT "PREDICTED WINNER" MEANS HERE, AND WHY IT IS THE WEAKER TEST.
-The graph's output is a raw logit -- the tensor is named "win_probability", but
-ValueNetworkEvaluator.EvaluateBoardState in Bots/src/DeepSetsCore.cs applies the
-sigmoid itself before returning. So this script thresholds at sigmoid(logit) >=
-0.5, equivalently logit >= 0, which is the convention train_local.py,
-evaluate_checkpoints.py and diagnose_value_net.py all use for accuracy.
-
-But the bot itself never thresholds anything. It feeds the win probability
-straight into the search as a continuous value and ranks moves with
-`score > bestScore` in BestChild()/BanditChild(). The only 0.5 comparisons
-anywhere in the agents are an unrelated UCB prior and some policy-logit bumps.
-
-That means a zero prediction-flip count does NOT establish that two models play
-identically: ANY nonzero difference can reorder two close moves and change the
-game. The count that actually bounds behavioural equivalence is "states with any
-nonzero difference", reported alongside. Read that one first; treat the
-prediction-flip count as the coarse gate it is.
-
-RUN THE TIMING HALF ON THE TARGET ARCHITECTURE. The subnormal penalty is not
-universal -- it is what NATIVE x86 does. A host that flushes denormals to zero
-pays nothing for them, so this script will report a ~1.0x timing ratio there
-even between a clean model and one stuffed with subnormals, and that number
-means "wrong machine", not "no problem".
-
-Measured directly while building this: on an Apple M1, with the pinned x86_64
-Python running under Rosetta, a float32 matmul against an all-subnormal operand
-was 0.87x the time of a normal one -- no penalty at all -- and this script
-reported 1.00x between the shipped model and a copy with 22% of its weights
-forced subnormal. The same property is why the shipped model has no subnormals
-in the first place: it was trained on that machine, and they never survived
-training. The seeds were trained natively on x86, where they did.
-
-So the agreement half of this script is architecture-independent and can be run
-anywhere; the timing half only means something on the cluster. The script warns
-when it detects this situation rather than letting a 1.0x ratio be read as
-reassurance.
-
-Requirements: onnxruntime, numpy, torch, torch_geometric -- all already pinned
-in scripts/setup_python_env.sh. No new dependencies.
+Needs onnxruntime, numpy, torch and torch_geometric.
 """
 import argparse
 import os
@@ -86,22 +36,16 @@ sys.path.insert(0, TRAINING_DIR)
 import onnxruntime as ort  # noqa: E402
 
 try:
-    # Features come from the training code path, unmodified. Reimplementing
-    # feature extraction here would mean this script could pass while the real
-    # one disagrees -- the exact failure mode tools/verify_parity.py exists to
-    # catch between the C# and Python extractors.
+    # Use the training feature code rather than a copy that could drift from it.
     from stream_dataset import SakkirinaStreamDataset  # noqa: E402
 except ImportError as e:  # pragma: no cover - environment problem, not logic
     sys.exit(f"ERROR: could not import training/stream_dataset.py ({e}).\n"
              f"       It needs torch and torch_geometric. Activate the venv built by "
              f"scripts/setup_python_env.sh first.")
 
-# The dataset's own default is 100,000 parsed graphs, sized for training, where
-# mixing across games matters and 24 GB is allocated for it. That buffer has to
-# FILL before it yields anything, so using it here would cost minutes and many
-# GB before the first comparison. A small buffer is enough: shard order is
-# already shuffled, and a few thousand records spans several hundred games
-# because each game contributes only a dozen or so.
+# A small shuffle buffer. The training default of 100,000 must fill before it
+# yields, which would cost minutes and many GB here; shard order is already
+# shuffled, and a few thousand records span hundreds of games.
 DEFAULT_SHUFFLE_BUFFER = 1000
 
 # Subnormal float32: nonzero and below FLT_MIN. These are what fall off
@@ -110,10 +54,8 @@ FLT_MIN = float(np.finfo(np.float32).tiny)
 
 
 def make_session(path):
-    """Single-threaded, matching tools/ParityCheck, export_to_onnx.py's
-    verify_export and the bot's own ValueNetworkEvaluator. Threading would buy
-    nothing on one small graph at a time, and here it would also add scheduler
-    noise to the very timings this script exists to measure."""
+    """Single-threaded, as in ParityCheck and the bot's evaluator; threads would
+    only add scheduler noise to the timings."""
     if not os.path.isfile(path):
         sys.exit(f"ERROR: no such ONNX file: {path}")
     opts = ort.SessionOptions()
@@ -123,9 +65,7 @@ def make_session(path):
 
 
 def count_subnormals(path):
-    """Subnormal and total weight counts, straight from the initializers.
-    Reported because it is what ties the timing gap to a cause rather than
-    leaving it as an unexplained difference between two files."""
+    """Subnormal and total float32 weight counts, from the initializers."""
     try:
         import onnx
         from onnx import numpy_helper
@@ -174,10 +114,7 @@ def main():
                         help="Untimed inferences per model before measuring (default: 20)")
     args = parser.parse_args()
 
-    # stream_dataset draws from the `random` module. Seeding it here makes the
-    # sample reproducible, which matters because this script is meant to gate a
-    # re-export: a flaky sample would make the gate flaky. Safe to touch the
-    # global RNG from a CLI entry point; nothing else in this process uses it.
+    # Seed `random`, which stream_dataset draws from, so the sample is reproducible.
     random.seed(args.seed)
 
     print("=" * 78)
@@ -247,8 +184,7 @@ def main():
         abs_diffs.append(d)
         if d != 0.0:
             nonzero_diff += 1
-        # sigmoid(logit) >= 0.5  <=>  logit >= 0. See the module docstring for
-        # why this is the coarse test and not the decisive one.
+        # sigmoid(logit) >= 0.5  <=>  logit >= 0.
         if (logit_a >= 0.0) != (logit_b >= 0.0):
             flipped += 1
             if len(flip_examples) < 5:
@@ -293,11 +229,8 @@ def main():
     if ta.mean() > 0:
         print(f"  B/A mean ratio : {ratio:.2f}x")
 
-    # A host that flushes denormals to zero pays nothing for subnormal weights,
-    # so a ~1x ratio there says nothing about how the same pair behaves on the
-    # machine the benchmark runs on. Catch that rather than let the number be
-    # read as reassurance -- see "RUN THE TIMING HALF ON THE TARGET
-    # ARCHITECTURE" in the module docstring.
+    # On a host that flushes denormals in hardware, a ~1x ratio says nothing about
+    # x86, where the benchmark runs.
     if len(subnormal_counts) == 2:
         lo, hi = sorted(subnormal_counts.values())
         if hi >= 1000 and hi >= 10 * max(lo, 1) and 0.8 <= ratio <= 1.25:

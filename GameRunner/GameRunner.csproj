@@ -18,11 +18,9 @@
 
     <ItemGroup>
       <!-- GameRunner loads Bots.dll by reflection, so NuGet never places
-           OnnxRuntime's assemblies and native library next to it. Referencing
-           the package here is what puts Microsoft.ML.OnnxRuntime.dll and
-           runtimes/<rid>/native/libonnxruntime.* in GameRunner's output, where
-           the dynamically-loaded bot can actually find them. See README,
-           "OnnxRuntime native library caveat". -->
+           OnnxRuntime next to it. This reference puts Microsoft.ML.OnnxRuntime.dll
+           and runtimes/<rid>/native/libonnxruntime.* in GameRunner's output, where
+           the loaded bot finds them. See README, "OnnxRuntime native library caveat". -->
       <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
     </ItemGroup>
 
@@ -37,11 +35,9 @@
     </ItemGroup>
 
     <ItemGroup>
-      <!-- Bots.dll is built, not committed. This item must track GameRunner's
-           own $(Configuration) explicitly: a Debug Bots.dll silently loaded
-           under a Release GameRunner build disables JIT optimizations for the
-           whole bot, which is exactly the kind of thing a wall-clock-budgeted
-           search cannot afford. -->
+      <!-- Bots.dll is built, not committed. The path follows GameRunner's own
+           $(Configuration), because a Debug Bots.dll under a Release GameRunner
+           runs the wall-clock-budgeted search without JIT optimizations. -->
       <None Include="..\Bots\bin\$(Configuration)\netstandard2.1\Bots.dll">
         <Link>Bots\Bots.dll</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

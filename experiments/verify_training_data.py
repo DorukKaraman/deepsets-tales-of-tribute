@@ -1,21 +1,13 @@
 """
-SUPERSEDED: this targets the PRE-SCHEMA-V2 data format (the single
-Train_/Val_Sakkirina.jsonl.gz pair, 101/17-dimensional features). Current
-generated data is verified with tools/verify_generated_data.py instead. Kept
-for completeness, since it is the check that was actually run against the
-older dataset.
+Read-only checks of the pre-v2 Sakkirina training data (the single
+Train_/Val_Sakkirina.jsonl.gz pair, 101/17-dimensional features). Data in the
+current format is checked with tools/verify_generated_data.py; this is kept as
+the check that was run against the older dataset.
 
-Read-only verification of the Sakkirina training data, answering the
-"Verify first" section of the pre-rewrite retrain checklist.
-
-Modifies nothing. Streams Train_Sakkirina.jsonl.gz and Val_Sakkirina.jsonl.gz
-line by line -- never loads either file into memory. The only in-memory state
-kept across the whole pass is a set of StateId strings per file (needed for
-the duplicate check and the train/val leakage check) plus small counters/lists
-whose cardinality is bounded by the number of distinct patrons, decks, cards,
-or inferred games, not by the number of records. On a very large train file
-that StateId set is itself a real memory cost (millions of GUID-sized
-strings); use --limit for a quick pass if that's a problem.
+Streams both files line by line. Memory is a StateId set per file (for the
+duplicate and train/val leakage checks) plus counters bounded by the number of
+patrons, decks, cards or games. On a large train file the StateId set is itself
+sizeable; use --limit for a quick pass.
 
 Usage:
     python3 experiments/verify_training_data.py                # full files
@@ -46,15 +38,14 @@ from card_db import CARD_EFFECTS  # noqa: E402
 
 PROGRESS_INTERVAL = 100_000
 
-# Mirrors StateParser.extract_global_context exactly (PATRON_ORDER and
-# favor_map are local to that function, not importable) -- keep in sync if
-# that file changes. This is exactly the 9-entry list item 5 checks against.
+# Patron order of the pre-v2 StateParser.extract_global_context, which kept it
+# local to the function; item 5 checks coverage against these 9 entries.
 PATRON_ORDER = [
     "TREASURY", "ANSEI", "DUKE_OF_CROWS", "RAJHIN", "PSIJIC",
     "ORGNUM", "HLAALU", "PELIN", "RED_EAGLE",
 ]
 
-# PlayerEnum, per the task's own KNOWN SCHEMA section.
+# PlayerEnum values.
 PLAYER1, PLAYER2, NO_PLAYER_SELECTED = 0, 1, 2
 
 
@@ -63,22 +54,18 @@ def progress(msg):
 
 
 def pick_effect_probe_ids(n=5):
-    """CommonIds with the most non-zero entries in their CARD_EFFECTS vector --
-    i.e. cards "known to have non-trivial effects" per item 8, chosen from the
-    actual db rather than hand-picked, so this stays correct if card_db.py
-    changes."""
+    """CommonIds with the most non-zero entries in their CARD_EFFECTS vector,
+    used by item 8 as the cards with non-trivial effects."""
     scored = [(cid, sum(1 for x in vec if x != 0)) for cid, vec in CARD_EFFECTS.items()]
     scored.sort(key=lambda t: -t[1])
     return [cid for cid, _ in scored[:n] if _ > 0]
 
 
 def iter_all_cards(state):
-    """Every card object reachable from one state, across every location:
-    tavern, our hand/played/cooldown/draw/known-upcoming-draws, our agents
-    (unwrapped to their RepresentingCard), and the enemy's hand+draw/played/
-    cooldown/agents. This is the single shared traversal behind items 6, 7,
-    and 8 -- deck ids, CommonId coverage, and the Effects field all come from
-    the same set of cards."""
+    """Every card object reachable from one state: tavern, our
+    hand/played/cooldown/draw/known-upcoming-draws, our agents (as their
+    RepresentingCard), and the enemy's hand+draw/played/cooldown/agents. Shared by
+    items 6, 7 and 8."""
     cp = state.get("CurrentPlayer") or {}
     ep = state.get("EnemyPlayer") or {}
 
@@ -109,10 +96,9 @@ def effects_is_nonempty(effects):
 
 
 def process_file(path, label, limit, compare_against_ids, effect_probe_ids):
-    """One streaming pass over one JSONL.gz file. Computes items 1, 2, 4, 5, 6,
-    7, 8, 9 for this file; if compare_against_ids is given (only for the train
-    pass), also computes item 3 (StateId overlap with that set). Returns
-    (stats_dict, this_file's_state_id_set)."""
+    """One streaming pass over one JSONL.gz file. Computes items 1, 2 and 4-9;
+    with compare_against_ids (train pass only) also item 3, StateId overlap with
+    that set. Returns (stats_dict, this_file's_state_id_set)."""
     state_ids = set()
     missing_state_id_count = 0
     total_records = 0
@@ -465,8 +451,7 @@ def main():
 
     effect_probe_ids = pick_effect_probe_ids(5)
 
-    # Val must be read first in full (or up to --limit) so its StateId set
-    # exists before the train pass checks for leakage against it.
+    # Read val first so its StateId set exists for the train pass's leakage check.
     progress("Pass 1/2: reading val file to build the StateId reference set...")
     val_stats, val_ids = process_file(args.val, "val", args.limit,
                                        compare_against_ids=None, effect_probe_ids=effect_probe_ids)

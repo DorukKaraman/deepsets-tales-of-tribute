@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 #
-# Fetch the third-party baseline agents this repository does NOT redistribute.
+# Fetch the third-party baseline agents this repository does not redistribute.
 #
 # SakkirinaSolo (2025 competition winner) and BestMCTS3 are other people's
-# competition entries. They are not ours to republish, so they are not in this
-# repository. This script clones the official competition archive at a pinned
-# commit and copies them into Bots/src/ on your machine, where the build will
-# pick them up. They remain the work of their respective authors and are not
-# covered by this repository's licence -- see README.md, "Third-party agents".
+# competition entries, so they are not in this repository. This clones the
+# official competition archive at a pinned commit and copies them into Bots/src/,
+# where the build picks them up. They remain their authors' work and are not
+# covered by this repository's licence; see README.md, "Third-party agents".
 #
-# It then derives two of our own agents from the fetched SakkirinaSolo.cs by
-# applying the patches in this directory (see their headers for exactly what
-# each one changes and why they ship as patches rather than source files).
+# It then derives two of our agents from the fetched SakkirinaSolo.cs by applying
+# the patches in this directory (their headers say what each changes).
 #
-# Running this is required to reproduce any baseline comparison. It is NOT
-# required to build or run DeepSetsBot / DeepSetsBlendBot themselves.
+# Needed for any baseline comparison, not for building or running DeepSetsBot /
+# DeepSetsBlendBot.
 #
-# Idempotent: safe to re-run. Use --force to overwrite existing files.
+# Safe to re-run. --force overwrites existing files.
 
 set -euo pipefail
 
@@ -46,10 +44,9 @@ FILES=(
   "BestMCTS3/PatronTierList.cs"
 )
 
-# SHA-256 of each file as it stands at the pinned commit, recorded when this
-# repository was assembled. A mismatch means the archive moved under the pin or
-# the checkout is corrupt -- either way, stop, rather than silently benchmark
-# against something other than what the paper measured.
+# SHA-256 of each file at the pinned commit. A mismatch means the archive moved
+# under the pin or the checkout is corrupt; stop rather than benchmark something
+# other than what the paper measured.
 EXPECTED_SHA256="\
 ef3f6e08a5d54e86092fe79fd8e46abf6701ab8a6f5f3bf3c2e7b4ffeba9ebf7  SakkirinaSolo.cs
 513053e5fd002cba9130f65c0aa63ef2c706e8341863c72b80c48134d93cb3d6  BestMCTS3.cs
