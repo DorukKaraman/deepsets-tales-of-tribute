@@ -5,8 +5,8 @@ Runs the production code on both sides: StateParser.json_to_pyg_graph in
 Python, and Bots.FeatureExtractor.ParseState in C# through tools/ParityCheck,
 which rebuilds a ScriptsOfTribute.Serializers.GameState from the logged JSON.
 
-Samples states from a generate_data.py output directory (default /tmp/gen50),
-spread evenly over four prestige-clock phases, and compares:
+Samples states from a generate_data.py output directory (--data-dir), spread
+evenly over four prestige-clock phases, and compares:
   - node matrix row count
   - node matrix contents, each side's rows sorted first
   - node matrix row order, unsorted, reported separately; the DeepSets model
@@ -21,7 +21,7 @@ Read-only against --data-dir. Builds tools/ParityCheck (Release) and writes only
 to a temp directory.
 
 Usage:
-    python tools/verify_parity.py
+    python tools/verify_parity.py --data-dir /path/to/gen50
     python tools/verify_parity.py --data-dir /path/to/gen50 --num-samples 50
 """
 import argparse
@@ -131,7 +131,7 @@ def sample_states(data_dir, num_samples, seed):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", default="/tmp/gen50")
+    parser.add_argument("--data-dir", required=True)
     parser.add_argument("--num-samples", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--configuration", default="Release")

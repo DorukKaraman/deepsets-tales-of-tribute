@@ -17,6 +17,22 @@ the official competition engine. For the engine's own documentation, see the
 
 ---
 
+## Repository map
+
+- **Run the agents:** [Build](#build), then `./GameRunner DeepSetsBot DeepSetsBlendBot …`. Needs only the .NET 8 SDK.
+- **Reproduce the model:** [REPRODUCE.md](REPRODUCE.md) sections 0–5: card database → data → split → train → export → verify.
+- **Run a paper experiment:** `./scripts/fetch_baselines.sh`, pick a config in [experiments/configs/](experiments/configs/README.md), submit it with `scripts/slurm_experiment_batched.sh` ([REPRODUCE.md section 7](REPRODUCE.md#7-paper-experiments)).
+
+| Path | Contents |
+|---|---|
+| `Bots/src/DeepSets*.cs` | The two submitted agents and their shared core (`DeepSetsCore.cs`: feature extraction, ONNX inference, card metadata); frozen as submitted. |
+| `Bots/src/SakkirinaGenNeural.cs` | Self-play data-generation agent. |
+| `models/` | Shipped ONNX model, its PyTorch checkpoint, the heuristic-only ablation checkpoint, `SHA256SUMS`. |
+| `training/` | Feature schema, DeepSets and flat-MLP networks, training, ONNX export, card database. |
+| `tools/` | Data generation and splitting, parity checks (`ParityCheck/`), benchmarking and aggregation, checkpoint evaluation and statistics. |
+| `experiments/` | The experiment agent `DeepSetsBotExp`, controls, configs, inference-verification scripts. See [experiments/README.md](experiments/README.md). |
+| `scripts/` | Baseline fetching and patches, pinned Python environment, SLURM templates. |
+
 ## The agents
 
 Each visible card is encoded as a 99-dimensional vector and passed through a
@@ -195,19 +211,7 @@ The ONNX file reports `producer: pytorch 2.2.2`. Reproducing its *byte* hash
 requires that version; see
 [REPRODUCE.md](REPRODUCE.md#reproducing-the-model-file-byte-for-byte).
 
-## Layout
-
-Ours:
-
-| Path | Contents |
-|---|---|
-| `Bots/src/DeepSets*.cs` | The two agents and their shared infrastructure (`DeepSetsCore.cs`: feature extraction, ONNX inference, card metadata). |
-| `Bots/src/SakkirinaGenNeural.cs` | Self-play data-generation agent. |
-| `models/` | The trained model, its checkpoint, the ablation checkpoint, and their hashes. |
-| `training/` | Feature schema (`StateParser.py`), network definition, training, ONNX export, card-database generation and audit. |
-| `tools/` | Data generation, dataset splitting, cross-language parity verification, benchmarking. |
-| `experiments/` | Control conditions, null results, the paper's experiment agent, and the experiment configs. See [experiments/README.md](experiments/README.md). |
-| `scripts/` | Baseline fetching, the three SakkirinaSolo patches, the pinned Python environment, and SLURM templates. |
+## Changes to upstream code
 
 Upstream (unmodified unless noted): `Engine/`, `gRPC/`, `Tests/`,
 `ModuleTests/`, `BotsTests/`, `Bots/src/` (all other bots).
@@ -216,9 +220,9 @@ the OnnxRuntime wiring described above, and a one-line-per-game
 `GAME_END_REASON:` print so a benchmark can tell a timeout apart from an illegal
 move (the engine's own stats counter pools both as "other factors").
 `Engine/src/utils/GameEndStatsCounter.cs` additionally counts
-`PREPARE_TIME_EXCEEDED`, which it previously threw on.
+`PREPARE_TIME_EXCEEDED`.
 
-### The dual-language feature schema
+## The dual-language feature schema
 
 The node and global feature vectors are defined **twice** — in
 `training/StateParser.py` for training, and in the `FeatureExtractor` class in

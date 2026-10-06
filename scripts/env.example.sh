@@ -2,9 +2,9 @@
 #
 #   cp scripts/env.example.sh $HOME/tot/env.sh
 #
-# scripts/slurm_experiment.sh (and through it slurm_experiment_batched.sh) and
-# scripts/slurm_benchmark.sh source $HOME/tot/env.sh at the top of every job.
-# Without it every task fails with "dotnet: command not found".
+# scripts/slurm_experiment.sh (and through it slurm_experiment_batched.sh)
+# sources $HOME/tot/env.sh at the top of every job. Without it every task fails
+# with "dotnet: command not found".
 #
 # A sourced file rather than ~/.bashrc: SLURM batch shells are non-interactive and
 # do not read .bashrc, so a PATH set there exists on the login node but not in

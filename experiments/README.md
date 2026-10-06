@@ -301,7 +301,8 @@ SOT_DUMP_DIR=/tmp/dumps ./GameRunner DeepSetsBot SakkirinaSolo -n 20 -to 10
 python experiments/verify_csharp_inference.py --dump-path /tmp/dumps
 
 # 3. compare the in-game feature distribution against validation
-python experiments/compare_ingame_vs_val.py --dump-path /tmp/dumps
+python experiments/compare_ingame_vs_val.py --dump-path /tmp/dumps \
+    --val-path /path/to/split/val/<shard>.jsonl.gz
 ```
 
 `verify_csharp_inference.py` is the decisive check: if it fails, there is a
@@ -316,16 +317,3 @@ states — better coverage, same comparison.
 
 These two scripts import from `tools/diagnose_value_net.py`, so run them from
 the repository root.
-
-## Superseded: pre-schema-v2 data verification
-
-`verify_training_data.py`
-
-Targets the **pre-schema-v2** data format — the single
-`Train_/Val_Sakkirina.jsonl.gz` pair with 101-dimensional node and
-17-dimensional global features, before the schema rewrite to 99/19. It does not
-run against current generated data; `tools/verify_generated_data.py` is the
-current equivalent.
-
-Kept because it is the check that was actually run against the older dataset,
-and the older dataset is what the earliest reported numbers came from.
