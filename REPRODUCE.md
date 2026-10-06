@@ -153,9 +153,9 @@ mkdir -p $HOME/tot
 cp scripts/env.example.sh $HOME/tot/env.sh
 ```
 
-`scripts/slurm_experiment.sh` (and through it `slurm_experiment_batched.sh`) and
-`scripts/slurm_benchmark.sh` run `source $HOME/tot/env.sh` at the top of every
-job. Skip the `cp` and every job fails with `dotnet: command not found`. The file
+`scripts/slurm_experiment.sh` (and through it `slurm_experiment_batched.sh`)
+runs `source $HOME/tot/env.sh` at the top of every job. Skip the `cp` and every
+job fails with `dotnet: command not found`. The file
 is sourced deliberately rather than put in `.bashrc`: SLURM batch shells are
 non-interactive and do not read `.bashrc`, so a `PATH` set there works on the
 login node, where you test, and is missing in every job, where it matters.
@@ -695,7 +695,7 @@ Runtime: a minute, plus a Release build of `tools/ParityCheck`.
 ### Model agreement
 
 ```bash
-python tools/diagnose_value_net.py --data-path /path/to/split/val --limit 10000
+python tools/diagnose_value_net.py --data-path /path/to/split/val/<shard>.jsonl.gz --limit 10000
 ```
 
 Streams real validation samples through both the exported ONNX model and the

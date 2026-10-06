@@ -24,7 +24,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 TRAINING_DIR = os.path.join(REPO_ROOT, "training")
 OUT_DIR = os.path.join(SCRIPT_DIR, "out")
-DEFAULT_VAL_PATH = os.path.join(REPO_ROOT, "GameRunner", "Val_Sakkirina.jsonl.gz")
 
 TOOLS_DIR = os.path.join(REPO_ROOT, "tools")
 
@@ -227,8 +226,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dump-path", type=str, required=True,
                          help="A single dump .jsonl file, OR a directory containing evals_*.jsonl / full_*.jsonl")
-    parser.add_argument("--val-path", type=str, default=DEFAULT_VAL_PATH,
-                         help=f"Validation .jsonl.gz path (default: {DEFAULT_VAL_PATH})")
+    parser.add_argument("--val-path", type=str, required=True,
+                         help="Validation .jsonl.gz path")
     parser.add_argument("--val-limit", type=int, default=5000,
                          help="Number of validation samples to parse for comparison (default: 5000)")
     args = parser.parse_args()

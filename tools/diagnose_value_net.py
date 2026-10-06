@@ -22,7 +22,6 @@ REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 TRAINING_DIR = os.path.join(REPO_ROOT, "training")
 OUT_DIR = os.path.join(SCRIPT_DIR, "out")
 
-DEFAULT_DATA_PATH = os.path.join(REPO_ROOT, "GameRunner", "Val_Sakkirina.jsonl.gz")
 PTH_PATH = os.path.join(REPO_ROOT, "models", "deepsets_value_network.pth")
 ONNX_PATH = os.path.join(REPO_ROOT, "models", "DeepSetsValueNetwork.onnx")
 
@@ -176,8 +175,8 @@ def main():
         description="Read-only ONNX-vs-PyTorch diagnostic for the Sakkirina value network.")
     parser.add_argument("--limit", type=int, default=10000,
                          help="Number of validation samples to read (default: 10000)")
-    parser.add_argument("--data-path", type=str, default=DEFAULT_DATA_PATH,
-                         help=f"Path to validation .jsonl.gz (default: {DEFAULT_DATA_PATH})")
+    parser.add_argument("--data-path", type=str, required=True,
+                         help="Path to validation .jsonl.gz")
     args = parser.parse_args()
 
     require_file(PTH_PATH, "PyTorch checkpoint")

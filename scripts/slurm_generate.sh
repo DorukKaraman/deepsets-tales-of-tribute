@@ -26,10 +26,9 @@
 #        sbatch scripts/slurm_generate.sh
 #
 # Total games = 32 * GAMES_PER_TASK; choose it together with --time.
-# tools/generate_data.sh plays at full strength (--timeout 10). SakkirinaGenNeural
-# runs ONNX inference on every rollout and took ~79.6s/game locally, against
-# SakkirinaGen's ~48s on cluster hardware. At ~6000 games, 32 tasks at ~80s/game
-# take roughly 4-5 hours, inside the 10-hour --time below.
+# tools/generate_data.sh plays at full strength (--timeout 10). On the cluster a
+# game takes 72.4s with SakkirinaGen and 69.1s with SakkirinaGenNeural, so a run
+# at the template's defaults takes about 4 hours, inside the 10-hour --time below.
 
 #SBATCH --job-name=sakgen
 #SBATCH --partition=CHANGE_ME_PARTITION

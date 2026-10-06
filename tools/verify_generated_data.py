@@ -61,8 +61,7 @@ def is_start_of_turn(state):
 
 
 def iter_all_cards(state):
-    """Every card object reachable from one state; the same traversal as
-    tools/verify_training_data.py's iter_all_cards."""
+    """Every card object reachable from one state."""
     cp = state.get("CurrentPlayer") or {}
     ep = state.get("EnemyPlayer") or {}
 

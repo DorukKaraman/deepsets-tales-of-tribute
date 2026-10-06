@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SLURM array template for the paper's experiment configs (experiments/configs/):
-# one array task = one game = one process, as in scripts/slurm_benchmark.sh, with
-# the experiment chosen by a config file at submission time.
+# one array task = one game = one process, with the experiment chosen by a config
+# file at submission time.
 #
 # One game per task because GameRunner reuses a bot instance across --runs N and
 # GameEndStatsCounter reports only aggregate counts. --runs 1 per process
